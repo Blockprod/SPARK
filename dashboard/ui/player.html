@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>shorts-engine — Preview</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:      #0d0f14;
+      --surface: #161a22;
+      --border:  #252a35;
+      --accent:  #5b8dee;
+      --success: #22c55e;
+      --error:   #ef4444;
+      --warning: #f59e0b;
+      --text:    #e2e8f0;
+      --muted:   #64748b;
+      --radius:  8px;
+      --font:    'Inter', 'Segoe UI', system-ui, sans-serif;
+    }
+
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+
+    /* ---- Header ---- */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: .9rem 2rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+    header a { color: var(--accent); text-decoration: none; font-size: .85rem; }
+    header a:hover { text-decoration: underline; }
+    header h1 { font-size: 1.1rem; font-weight: 700; }
+    header h1 span { color: var(--accent); }
+    .run-id-badge {
+      font-family: monospace;
+      font-size: .75rem;
+      background: var(--border);
+      padding: .2rem .6rem;
+      border-radius: var(--radius);
+      color: var(--muted);
+    }
+
+    /* ---- Layout ---- */
+    main {
+      display: grid;
+      grid-template-columns: 380px 1fr;
+      gap: 0;
+      overflow: hidden;
+      height: calc(100vh - 56px);
+    }
+
+    /* ---- Video column ---- */
+    .video-col {
+      background: #000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      border-right: 1px solid var(--border);
+      overflow: hidden;
+    }
+
+    #video-player {
+      width: 100%;
+      max-width: 360px;
+      aspect-ratio: 9/16;
+      background: #000;
+      border-radius: var(--radius);
+      overflow: hidden;
+      position: relative;
+    }
+
+    video {
+      width: 100%;
+      height: 100%;
+      display: block;
+      object-fit: cover;
+    }
+
+    .video-placeholder {
+      width: 100%;
+      aspect-ratio: 9/16;
+      max-width: 360px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: var(--surface);
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      color: var(--muted);
+      gap: .75rem;
+    }
+
+    .video-controls {
+      margin-top: 1rem;
+      display: flex;
+      gap: .5rem;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    /* ---- Info column ---- */
+    .info-col {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .info-scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding: 1.5rem;
+    }
+
+    /* ---- Sections ---- */
+    .section { margin-bottom: 1.75rem; }
+    .section-title {
+      font-size: .7rem;
+      text-transform: uppercase;
+      letter-spacing: .1em;
+      color: var(--muted);
+      margin-bottom: .75rem;
+      padding-bottom: .4rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    /* ---- Status ---- */
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: .4rem;
+      padding: .25rem .75rem;
+      border-radius: 999px;
+      font-size: .8rem;
+      font-weight: 600;
+    }
+    .status-success { background: rgba(34,197,94,.15);  color: var(--success); }
+    .status-error   { background: rgba(239,68,68,.15);  color: var(--error); }
+    .status-running { background: rgba(245,158,11,.15); color: var(--warning); }
+    .status-started { background: rgba(91,141,238,.15); color: var(--accent); }
+
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+    /* ---- Metadata fields ---- */
+    .meta-grid {
+      display: grid;
+      grid-template-columns: 140px 1fr;
+      gap: .5rem .75rem;
+      font-size: .85rem;
+    }
+    .meta-label { color: var(--muted); font-size: .8rem; }
+    .meta-value { word-break: break-word; }
+    .meta-value a { color: var(--accent); text-decoration: none; }
+    .meta-value a:hover { text-decoration: underline; }
+
+    /* ---- Tags ---- */
+    .tags-wrap { display: flex; flex-wrap: wrap; gap: .4rem; }
+    .tag {
+      background: var(--border);
+      border-radius: 999px;
+      padding: .15rem .6rem;
+      font-size: .72rem;
+      color: var(--muted);
+    }
+
+    /* ---- Scenes accordion ---- */
+    .scene-item {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-bottom: .5rem;
+      overflow: hidden;
+    }
+    .scene-header {
+      padding: .6rem .9rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      background: var(--surface);
+      font-size: .85rem;
+      font-weight: 600;
+      user-select: none;
+    }
+    .scene-header:hover { background: rgba(255,255,255,.03); }
+    .scene-body {
+      display: none;
+      padding: .75rem .9rem;
+      font-size: .82rem;
+      line-height: 1.6;
+      background: var(--bg);
+      border-top: 1px solid var(--border);
+    }
+    .scene-body.open { display: block; }
+    .scene-field { margin-bottom: .4rem; }
+    .scene-field-label { color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .07em; }
+    .scene-field-value { margin-top: .15rem; }
+
+    /* ---- Upload panel ---- */
+    .upload-panel {
+      padding: 1.25rem 1.5rem;
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+      display: flex;
+      align-items: center;
+      gap: .75rem;
+      flex-wrap: wrap;
+    }
+
+    /* ---- Buttons ---- */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: .4rem;
+      padding: .5rem 1rem;
+      border-radius: var(--radius);
+      border: none;
+      cursor: pointer;
+      font-size: .875rem;
+      font-weight: 600;
+      transition: opacity .15s, transform .1s;
+      text-decoration: none;
+    }
+    .btn:active { transform: scale(.97); }
+    .btn:disabled { opacity: .45; cursor: not-allowed; }
+    .btn-primary  { background: var(--accent); color: #fff; }
+    .btn-secondary{ background: var(--border); color: var(--text); }
+    .btn-success  { background: var(--success); color: #000; }
+    .btn-danger   { background: var(--error); color: #fff; }
+    .btn-sm { font-size: .78rem; padding: .35rem .7rem; }
+
+    /* ---- Toast ---- */
+    #toast {
+      position: fixed;
+      bottom: 1.5rem;
+      right: 1.5rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-left-width: 4px;
+      border-radius: var(--radius);
+      padding: .75rem 1.25rem;
+      font-size: .875rem;
+      max-width: 320px;
+      z-index: 1000;
+      display: none;
+      box-shadow: 0 4px 24px rgba(0,0,0,.5);
+    }
+    #toast.show { display: block; animation: slideIn .2s; }
+    @keyframes slideIn { from { transform: translateY(8px); opacity:0 } to { transform: translateY(0); opacity:1 } }
+
+    /* ---- Loader ---- */
+    .loader {
+      width: 20px; height: 20px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+      display: inline-block;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>shorts<span>-engine</span></h1>
+  <a href="/">← Dashboard</a>
+  <span class="run-id-badge" id="hdr-run-id">—</span>
+  <div style="flex:1"></div>
+  <span id="hdr-status"></span>
+</header>
+
+<main>
+  <!-- ====== VIDEO COLUMN ====== -->
+  <div class="video-col" id="video-col">
+    <div class="video-placeholder" id="video-placeholder">
+      <div class="loader"></div>
+      <p style="font-size:.8rem">Chargement du run…</p>
+    </div>
+
+    <div id="video-container" style="display:none; width:100%; align-items:center; flex-direction:column">
+      <div id="video-player">
+        <video id="vid" controls playsinline preload="metadata">
+          Votre navigateur ne supporte pas la lecture vidéo.
+        </video>
+      </div>
+
+      <div class="video-controls">
+        <a id="btn-download" href="#" download class="btn btn-secondary btn-sm">⬇ Télécharger</a>
+        <button class="btn btn-secondary btn-sm" onclick="toggleFullscreen()">⛶ Plein écran</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== INFO COLUMN ====== -->
+  <div class="info-col">
+    <div class="info-scroll" id="info-scroll">
+
+      <!-- Loading state -->
+      <div id="loading-state" class="section" style="display:flex;flex-direction:column;align-items:center;padding:3rem;gap:1rem;color:var(--muted)">
+        <div class="loader"></div>
+        <p>Chargement des métadonnées…</p>
+      </div>
+
+      <!-- Error state -->
+      <div id="error-state" style="display:none" class="section">
+        <div style="background:rgba(239,68,68,.1);border:1px solid var(--error);border-radius:var(--radius);padding:1rem;color:var(--error);font-size:.875rem">
+          <strong>Erreur :</strong> <span id="error-msg"></span>
+        </div>
+      </div>
+
+      <!-- Content (hidden until loaded) -->
+      <div id="content-state" style="display:none">
+
+        <!-- Status + run info -->
+        <div class="section">
+          <div class="section-title">Statut du run</div>
+          <div class="meta-grid">
+            <span class="meta-label">Statut</span>
+            <span id="field-status"></span>
+            <span class="meta-label">Run ID</span>
+            <span class="meta-value" id="field-run-id" style="font-family:monospace;font-size:.78rem"></span>
+            <span class="meta-label">Topic</span>
+            <span class="meta-value" id="field-topic"></span>
+            <span class="meta-label">Scènes</span>
+            <span class="meta-value" id="field-scenes"></span>
+            <span class="meta-label">Durée</span>
+            <span class="meta-value" id="field-duration"></span>
+            <span class="meta-label">Démarré</span>
+            <span class="meta-value" id="field-started"></span>
+            <span class="meta-label">Terminé</span>
+            <span class="meta-value" id="field-finished"></span>
+          </div>
+        </div>
+
+        <!-- YouTube metadata -->
+        <div class="section" id="section-yt">
+          <div class="section-title">Métadonnées YouTube</div>
+          <div class="meta-grid">
+            <span class="meta-label">Titre</span>
+            <span class="meta-value" id="yt-title" style="font-weight:600"></span>
+            <span class="meta-label">Description</span>
+            <span class="meta-value" id="yt-description" style="white-space:pre-wrap;font-size:.8rem;color:var(--muted)"></span>
+            <span class="meta-label">Tags</span>
+            <span class="meta-value" id="yt-tags"></span>
+            <span class="meta-label">URL YouTube</span>
+            <span class="meta-value" id="yt-url"></span>
+          </div>
+        </div>
+
+        <!-- Fichiers -->
+        <div class="section">
+          <div class="section-title">Fichiers générés</div>
+          <div class="meta-grid">
+            <span class="meta-label">Vidéo finale</span>
+            <span class="meta-value" id="file-video" style="font-family:monospace;font-size:.75rem;color:var(--muted)"></span>
+            <span class="meta-label">SRT sous-titres</span>
+            <span class="meta-value" id="file-srt" style="font-family:monospace;font-size:.75rem;color:var(--muted)"></span>
+          </div>
+        </div>
+
+        <!-- Scenes accordion -->
+        <div class="section" id="section-scenes">
+          <div class="section-title">Scènes du script</div>
+          <div id="scenes-accordion"></div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Upload footer -->
+    <div class="upload-panel" id="upload-panel" style="display:none">
+      <div style="flex:1">
+        <div style="font-size:.85rem;font-weight:600">Prêt pour publication</div>
+        <div style="font-size:.75rem;color:var(--muted)" id="upload-hint">Cliquez pour uploader sur YouTube</div>
+      </div>
+      <button class="btn btn-success" id="btn-upload" onclick="triggerUpload()">
+        ↑ Uploader sur YouTube
+      </button>
+    </div>
+
+  </div>
+</main>
+
+<div id="toast"></div>
+
+<script>
+  // ---- Init ----
+  const params = new URLSearchParams(window.location.search);
+  const RUN_ID = params.get('run_id');
+  let runData = null;
+  let uploadInProgress = false;
+
+  window.addEventListener('DOMContentLoaded', () => {
+    if (!RUN_ID) {
+      showError('Aucun run_id fourni. Ajoutez ?run_id=<id> à l\'URL.');
+      return;
+    }
+    document.getElementById('hdr-run-id').textContent = RUN_ID;
+    loadPreview();
+  });
+
+  // ---- Load preview data ----
+  async function loadPreview() {
+    try {
+      const res = await fetch(`/preview/${RUN_ID}`);
+      if (res.status === 404) throw new Error(`Run "${RUN_ID}" introuvable.`);
+      if (!res.ok) throw new Error(`Erreur HTTP ${res.status}`);
+      runData = await res.json();
+      renderPreview(runData);
+    } catch (e) {
+      showError(e.message);
+    }
+  }
+
+  // ---- Render all UI from run data ----
+  function renderPreview(data) {
+    document.getElementById('loading-state').style.display = 'none';
+    document.getElementById('content-state').style.display = 'block';
+
+    // Header
+    const statusEl = document.getElementById('hdr-status');
+    statusEl.innerHTML = statusPill(data.status);
+
+    // Status fields
+    document.getElementById('field-status').innerHTML = statusPill(data.status);
+    document.getElementById('field-run-id').textContent = data.run_id || '—';
+    document.getElementById('field-topic').textContent = data.topic || '—';
+    document.getElementById('field-scenes').textContent = data.scenes != null ? `${data.scenes} scènes` : '—';
+    document.getElementById('field-duration').textContent = data.duration_sec != null ? `${data.duration_sec}s` : '—';
+    document.getElementById('field-started').textContent = data.started_at ? new Date(data.started_at).toLocaleString('fr-FR') : '—';
+    document.getElementById('field-finished').textContent = data.finished_at ? new Date(data.finished_at).toLocaleString('fr-FR') : '—';
+
+    // File paths
+    document.getElementById('file-video').textContent = data.final_video || '—';
+    document.getElementById('file-srt').textContent = data.srt_file || '—';
+
+    // YouTube metadata — loaded separately if available
+    populateYTMeta(data);
+
+    // Load scenes from manifest
+    loadScenesFromManifest(data.run_id);
+
+    // Video player
+    if (data.final_video && data.status === 'success') {
+      loadVideoPlayer(data.run_id);
+    }
+
+    // Upload panel
+    if (data.status === 'success' && !data.youtube_url) {
+      document.getElementById('upload-panel').style.display = 'flex';
+    } else if (data.youtube_url) {
+      document.getElementById('upload-panel').style.display = 'flex';
+      document.getElementById('btn-upload').disabled = true;
+      document.getElementById('btn-upload').textContent = '✓ Publié';
+      document.getElementById('upload-hint').textContent = data.youtube_url;
+    }
+  }
+
+  function populateYTMeta(data) {
+    // If YouTube URL is known, populate link
+    const ytUrlEl = document.getElementById('yt-url');
+    if (data.youtube_url) {
+      ytUrlEl.innerHTML = `<a href="${escHtml(data.youtube_url)}" target="_blank" rel="noopener">${escHtml(data.youtube_url)}</a>`;
+    } else {
+      ytUrlEl.textContent = 'Non encore publié';
+    }
+  }
+
+  async function loadScenesFromManifest(runId) {
+    // Try to fetch the manifest JSON to get script payload + scenes
+    try {
+      const res = await fetch(`/preview/${runId}`);
+      if (!res.ok) return;
+      const preview = await res.json();
+      // Scenes come from the script payload stored server-side
+      // For a richer display, attempt to load the log manifest directly is not
+      // exposed as an endpoint; the preview endpoint returns top-level fields.
+      // We display what we have.
+      const accordion = document.getElementById('scenes-accordion');
+      if (!preview.scenes || preview.scenes < 1) {
+        accordion.innerHTML = '<p style="color:var(--muted);font-size:.82rem">Données de scènes non disponibles.</p>';
+        return;
+      }
+      accordion.innerHTML = `<p style="color:var(--muted);font-size:.82rem">${preview.scenes} scène(s) générée(s). Récupérez les détails depuis le manifeste de run dans logs/.</p>`;
+    } catch {}
+  }
+
+  function loadVideoPlayer(runId) {
+    const placeholder = document.getElementById('video-placeholder');
+    const container = document.getElementById('video-container');
+    const vid = document.getElementById('vid');
+    const downloadBtn = document.getElementById('btn-download');
+
+    const videoUrl = `/video/${runId}`;
+    vid.src = videoUrl;
+    downloadBtn.href = videoUrl;
+    downloadBtn.download = `short_${runId}.mp4`;
+
+    placeholder.style.display = 'none';
+    container.style.display = 'flex';
+
+    vid.addEventListener('error', () => {
+      container.style.display = 'none';
+      placeholder.style.display = 'flex';
+      placeholder.innerHTML = '<p style="color:var(--error);font-size:.82rem">Vidéo indisponible.</p>';
+    });
+  }
+
+  // ---- Upload trigger ----
+  async function triggerUpload() {
+    if (uploadInProgress) return;
+    uploadInProgress = true;
+    const btn = document.getElementById('btn-upload');
+    btn.disabled = true;
+    btn.textContent = '⏳ Upload en cours…';
+
+    try {
+      const res = await fetch(`/upload/${RUN_ID}`, { method: 'POST' });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      btn.textContent = '✓ Publié';
+      document.getElementById('upload-hint').innerHTML =
+        `<a href="${escHtml(data.youtube_url)}" target="_blank" rel="noopener" style="color:var(--accent)">${escHtml(data.youtube_url)}</a>`;
+      showToast('Vidéo publiée sur YouTube !', 'success');
+      const ytUrlEl = document.getElementById('yt-url');
+      ytUrlEl.innerHTML = `<a href="${escHtml(data.youtube_url)}" target="_blank" rel="noopener">${escHtml(data.youtube_url)}</a>`;
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = '↑ Uploader sur YouTube';
+      uploadInProgress = false;
+      showToast(`Erreur upload: ${e.message}`, 'error');
+    }
+  }
+
+  // ---- Fullscreen ----
+  function toggleFullscreen() {
+    const vid = document.getElementById('vid');
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      vid.requestFullscreen?.() || vid.webkitRequestFullscreen?.();
+    }
+  }
+
+  // ---- Helpers ----
+  function statusPill(status) {
+    const map = {
+      success: ['status-success', '✓ Succès'],
+      error:   ['status-error',   '✗ Erreur'],
+      running: ['status-running', '⟳ En cours'],
+      started: ['status-started', '▶ Démarré'],
+    };
+    const [cls, label] = map[status] || ['status-started', status || '?'];
+    return `<span class="status-pill ${cls}"><span class="dot"></span>${label}</span>`;
+  }
+
+  function showError(msg) {
+    document.getElementById('loading-state').style.display = 'none';
+    document.getElementById('error-state').style.display = 'block';
+    document.getElementById('error-msg').textContent = msg;
+  }
+
+  function showToast(msg, type = 'info') {
+    const toast = document.getElementById('toast');
+    const colors = { success: '#22c55e', error: '#ef4444', info: '#5b8dee' };
+    toast.style.borderLeftColor = colors[type] || colors.info;
+    toast.textContent = msg;
+    toast.classList.add('show');
+    setTimeout(() => toast.classList.remove('show'), 3500);
+  }
+
+  function escHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+</script>
+</body>
+</html>

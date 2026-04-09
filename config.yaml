@@ -1,0 +1,176 @@
+# shorts-engine global configuration
+# All runtime-sensitive secrets stay in .env.
+# This file stores deterministic pipeline behavior and defaults.
+
+project:
+  name: shorts-engine
+  timezone: Europe/Paris
+  language: fr
+  niche: "L'IA expliquee par l'Histoire"
+
+paths:
+  logs_dir: ./logs
+  outputs_dir: ./outputs
+  prompts_dir: ./prompts
+  # Optional dedicated folders under outputs
+  clips_dir: ./outputs/clips
+  audio_dir: ./outputs/audio
+  renders_dir: ./outputs/renders
+  temp_dir: ./outputs/tmp
+
+logging:
+  # JSON logs per run in logs/
+  level: INFO
+  json: true
+  run_log_prefix: run
+
+pipeline:
+  # Shorts constraints
+  min_duration_sec: 50
+  max_duration_sec: 60
+  max_scenes: 8
+  target_aspect_ratio: "9:16"
+  target_width: 1080
+  target_height: 1920
+  target_fps: 24
+
+  # Flow controls
+  parallel_scene_generation: false
+  keep_intermediate_files: true
+  fail_fast: true
+
+trends:
+  # Weighted score for ranking candidate topics
+  scoring_weights:
+    google_volume: 0.35
+    google_momentum: 0.30
+    reddit_mentions: 0.20
+    reddit_engagement: 0.15
+
+  google:
+    geo: FR
+    hl: fr-FR
+    tz: 60
+    cat: 0
+    timeframe: now 7-d
+    max_topics: 20
+
+  reddit:
+    subreddits:
+      - artificial
+      - MachineLearning
+      - singularity
+      - histoire
+      - france
+    lookback_hours: 72
+    max_posts_per_subreddit: 25
+    min_score: 5
+
+script_generation:
+  provider: gemini
+  model: gemini-2.0-flash
+  temperature: 0.8
+  top_p: 0.95
+  max_output_tokens: 4096
+
+  # Output contract expected from LLM
+  output_format: strict_json
+  narration_style: "historique, pedagogique, vivant"
+  include_hooks: true
+  include_cta: true
+
+video_generation:
+  provider: ltx-2.3
+  model_id: Lightricks/LTX-Video-2.3
+  device: cuda
+  dtype: float16
+
+  generation:
+    num_inference_steps: 30
+    guidance_scale: 6.5
+    seed: 42
+    negative_prompt: "blurry, low resolution, watermark, text artifacts, flicker, frame jitter"
+
+  scenes:
+    max_scene_duration_sec: 10
+    transition: hard_cut
+
+  coherence:
+    enable_image_conditioning: true
+    conditioning_strength: 0.6
+    # If empty, first generated keyframe can be used as reference by runtime logic
+    reference_image_path: ""
+
+audio_generation:
+  active_backend: kokoro
+  language: fr
+
+  kokoro:
+    voice: fr_female_default
+    speed: 1.0
+    sample_rate: 24000
+    output_format: wav
+
+  # Prepared for future online swap without changing pipeline contract
+  voxtral:
+    enabled: false
+    model: ""
+
+post_production:
+  ffmpeg:
+    video_codec: libx264
+    audio_codec: aac
+    crf: 20
+    preset: medium
+    audio_bitrate: 192k
+    pix_fmt: yuv420p
+    threads: 0
+
+  subtitles:
+    enabled: true
+    max_chars_per_line: 42
+    max_lines: 2
+    line_padding_ms: 120
+    style:
+      font_name: Arial
+      font_size: 54
+      primary_color: "&H00FFFFFF"
+      outline_color: "&H00000000"
+      back_color: "&H64000000"
+      outline: 2
+      shadow: 0
+      alignment: 2
+      margin_v: 120
+
+uploader:
+  provider: youtube_data_api_v3
+  default_privacy_status: private
+  notify_subscribers: false
+  category_id: 27
+  default_tags:
+    - IA
+    - Histoire
+    - Vulgarisation
+    - Tech
+    - Shorts
+
+scheduler:
+  enabled: true
+  timezone: Europe/Paris
+  max_workers: 4
+  misfire_grace_time_sec: 300
+  coalesce: true
+
+  # Peak slots for FR Shorts audience (can be tuned from dashboard later)
+  default_publish_slots:
+    - "12:30"
+    - "18:30"
+    - "21:00"
+
+dashboard:
+  host: 127.0.0.1
+  port: 8000
+  sse_heartbeat_sec: 5
+  allow_origins:
+    - http://127.0.0.1:8000
+    - http://localhost:8000

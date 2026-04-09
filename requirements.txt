@@ -1,0 +1,61 @@
+# shorts-engine requirements (Python 3.11)
+# Install with: pip install -r requirements.txt
+# For CUDA-enabled PyTorch wheels (Windows/Linux, CUDA 12.1)
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+# Core runtime
+pydantic==2.10.6
+pydantic-settings==2.7.1
+PyYAML==6.0.2
+python-dotenv==1.0.1
+orjson==3.10.15
+httpx==0.28.1
+tenacity==9.0.0
+
+# LLM script generation (Gemini Flash 2.0)
+google-generativeai==0.8.5
+
+# Video generation stack (LTX-2.3 local)
+torch==2.5.1
+torchvision==0.20.1
+torchaudio==2.5.1
+diffusers==0.31.0
+transformers==4.46.3
+accelerate==1.2.1
+safetensors==0.4.5
+huggingface-hub==0.27.1
+sentencepiece==0.2.0
+opencv-python==4.10.0.84
+Pillow==11.1.0
+numpy==2.2.2
+
+# Audio generation (Kokoro local fallback)
+kokoro-onnx==0.4.9
+onnxruntime-gpu==1.20.1
+soundfile==0.13.0
+librosa==0.10.2.post1
+
+# Post-production (FFmpeg via Python)
+ffmpeg-python==0.2.0
+pysubs2==1.7.3
+
+# Trends ingestion
+pytrends==4.9.2
+praw==7.8.1
+
+# YouTube upload
+google-api-python-client==2.159.0
+google-auth==2.37.0
+google-auth-httplib2==0.2.0
+google-auth-oauthlib==1.2.1
+
+# Scheduler + dashboard
+APScheduler==3.10.4
+fastapi==0.115.8
+uvicorn==0.34.0
+sse-starlette==2.2.1
+jinja2==3.1.5
+python-multipart==0.0.20
+
+# Optional developer quality tools (kept in main requirements for quick bootstrap)
+rich==13.9.4

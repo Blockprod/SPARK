@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>shorts-engine — Dashboard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0d0f14;
+      --surface:   #161a22;
+      --border:    #252a35;
+      --accent:    #5b8dee;
+      --accent2:   #7c3aed;
+      --success:   #22c55e;
+      --warning:   #f59e0b;
+      --error:     #ef4444;
+      --text:      #e2e8f0;
+      --muted:     #64748b;
+      --radius:    8px;
+      --font:      'Inter', 'Segoe UI', system-ui, sans-serif;
+    }
+
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+
+    /* ---- Header ---- */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 2rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+    header h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
+    header h1 span { color: var(--accent); }
+    .badge {
+      font-size: .7rem;
+      padding: .15rem .5rem;
+      border-radius: 999px;
+      background: var(--accent2);
+      color: #fff;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    /* ---- Layout ---- */
+    main {
+      display: grid;
+      grid-template-columns: 340px 1fr;
+      gap: 0;
+      height: calc(100vh - 58px);
+      overflow: hidden;
+    }
+
+    /* ---- Sidebar ---- */
+    .sidebar {
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .sidebar-section { padding: 1.25rem; border-bottom: 1px solid var(--border); }
+    .sidebar-section h2 {
+      font-size: .8rem;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      color: var(--muted);
+      margin-bottom: .75rem;
+    }
+
+    /* ---- Topics list ---- */
+    #topics-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: .5rem 0;
+    }
+    .topic-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: .6rem 1.25rem;
+      cursor: pointer;
+      transition: background .15s;
+      gap: .5rem;
+    }
+    .topic-item:hover { background: rgba(91,141,238,.08); }
+    .topic-item.selected { background: rgba(91,141,238,.15); border-left: 3px solid var(--accent); }
+    .topic-text { font-size: .88rem; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .topic-score {
+      font-size: .72rem;
+      color: var(--accent);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .topic-sources { font-size: .65rem; color: var(--muted); }
+
+    /* ---- Buttons ---- */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: .4rem;
+      padding: .5rem 1rem;
+      border-radius: var(--radius);
+      border: none;
+      cursor: pointer;
+      font-size: .875rem;
+      font-weight: 600;
+      transition: opacity .15s, transform .1s;
+    }
+    .btn:active { transform: scale(.97); }
+    .btn:disabled { opacity: .45; cursor: not-allowed; }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-secondary { background: var(--border); color: var(--text); }
+    .btn-danger  { background: var(--error); color: #fff; }
+    .btn-success { background: var(--success); color: #000; }
+    .btn-full { width: 100%; justify-content: center; }
+
+    /* ---- Generate panel ---- */
+    .generate-panel { padding: 1.25rem; border-bottom: 1px solid var(--border); }
+    .generate-panel h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: .75rem; }
+    .form-row { margin-bottom: .75rem; }
+    .form-row label { display: block; font-size: .78rem; color: var(--muted); margin-bottom: .3rem; }
+    .form-row input[type="text"],
+    .form-row input[type="datetime-local"] {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: .45rem .7rem;
+      border-radius: var(--radius);
+      font-size: .85rem;
+    }
+    .form-row input:focus { outline: 2px solid var(--accent); border-color: transparent; }
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      margin-bottom: .75rem;
+      font-size: .85rem;
+    }
+    .checkbox-row input { accent-color: var(--accent); width: 15px; height: 15px; }
+
+    /* ---- Main content ---- */
+    .content {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ---- Runs table ---- */
+    .runs-header {
+      padding: 1.25rem 1.5rem .75rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+    }
+    .runs-header h2 { font-size: 1rem; font-weight: 600; }
+
+    #runs-table-wrap { flex: 1; overflow-y: auto; padding: 1rem 1.5rem; }
+    table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+    th {
+      text-align: left;
+      font-size: .72rem;
+      text-transform: uppercase;
+      letter-spacing: .07em;
+      color: var(--muted);
+      padding: .5rem .75rem;
+      border-bottom: 1px solid var(--border);
+    }
+    td { padding: .6rem .75rem; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    tr:hover td { background: rgba(255,255,255,.02); }
+    .run-id-cell { font-family: monospace; font-size: .78rem; color: var(--muted); }
+    .status-pill {
+      display: inline-block;
+      padding: .15rem .55rem;
+      border-radius: 999px;
+      font-size: .72rem;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .status-running  { background: rgba(245,158,11,.15); color: var(--warning); }
+    .status-success  { background: rgba(34,197,94,.15);  color: var(--success); }
+    .status-error    { background: rgba(239,68,68,.15);  color: var(--error); }
+    .status-started  { background: rgba(91,141,238,.15); color: var(--accent); }
+
+    /* ---- Progress log ---- */
+    .log-panel {
+      height: 220px;
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+    }
+    .log-panel-header {
+      padding: .6rem 1.5rem;
+      font-size: .78rem;
+      text-transform: uppercase;
+      letter-spacing: .07em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: .75rem;
+    }
+    #log-run-id { color: var(--accent); font-family: monospace; }
+    #log-output {
+      flex: 1;
+      overflow-y: auto;
+      padding: .75rem 1.5rem;
+      font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+      font-size: .78rem;
+      line-height: 1.6;
+    }
+    .log-entry { display: flex; gap: .75rem; }
+    .log-ts { color: var(--muted); white-space: nowrap; }
+    .log-stage { color: var(--accent); font-weight: 600; min-width: 80px; }
+    .log-msg { flex: 1; }
+    .log-error .log-stage { color: var(--error); }
+    .log-done .log-stage  { color: var(--success); }
+
+    /* ---- Pulse indicator ---- */
+    .pulse {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--success);
+      animation: pulse 1.4s infinite;
+      display: inline-block;
+    }
+    .pulse.idle { background: var(--muted); animation: none; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: .4; transform: scale(.8); }
+    }
+
+    /* ---- Empty state ---- */
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 3rem;
+      color: var(--muted);
+      gap: .75rem;
+    }
+    .empty-state svg { opacity: .3; }
+
+    /* ---- Toast notification ---- */
+    #toast {
+      position: fixed;
+      bottom: 1.5rem;
+      right: 1.5rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: .75rem 1.25rem;
+      font-size: .875rem;
+      max-width: 340px;
+      z-index: 1000;
+      display: none;
+      box-shadow: 0 4px 24px rgba(0,0,0,.4);
+    }
+    #toast.show { display: block; animation: slideIn .2s ease; }
+    @keyframes slideIn {
+      from { transform: translateY(10px); opacity: 0; }
+      to   { transform: translateY(0);   opacity: 1; }
+    }
+
+    /* ---- Scrollbar ---- */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>shorts<span>-engine</span></h1>
+  <span class="badge">Dashboard</span>
+  <div style="flex:1"></div>
+  <span class="pulse idle" id="pulse-indicator"></span>
+  <span id="status-label" style="font-size:.8rem;color:var(--muted);margin-left:.5rem">Idle</span>
+</header>
+
+<main>
+  <!-- ====== SIDEBAR ====== -->
+  <aside class="sidebar">
+
+    <!-- Trends section -->
+    <div class="sidebar-section">
+      <h2>Tendances</h2>
+      <button class="btn btn-secondary btn-full" id="btn-refresh-trends" onclick="loadTrends()">
+        ↻ Actualiser les trends
+      </button>
+    </div>
+
+    <div id="topics-list">
+      <div class="empty-state" style="padding:2rem">
+        <p style="font-size:.8rem">Cliquez sur "Actualiser" pour charger les tendances.</p>
+      </div>
+    </div>
+
+    <!-- Generate form -->
+    <div class="generate-panel">
+      <h2>Générer un Short</h2>
+
+      <div class="form-row">
+        <label for="input-topic">Topic (laisser vide = top tendance)</label>
+        <input type="text" id="input-topic" placeholder="ex: Algorithmes de recommandation" />
+      </div>
+
+      <div class="form-row">
+        <label for="input-publish-at">Publication programmée (UTC)</label>
+        <input type="datetime-local" id="input-publish-at" />
+      </div>
+
+      <div class="checkbox-row">
+        <input type="checkbox" id="input-upload" />
+        <label for="input-upload">Uploader automatiquement sur YouTube</label>
+      </div>
+
+      <button class="btn btn-primary btn-full" id="btn-generate" onclick="startGenerate()">
+        ▶ Lancer le pipeline
+      </button>
+    </div>
+
+  </aside>
+
+  <!-- ====== CONTENT ====== -->
+  <div class="content">
+
+    <div class="runs-header">
+      <h2>Historique des runs</h2>
+      <button class="btn btn-secondary" onclick="loadRuns()" style="font-size:.8rem;padding:.35rem .8rem">↻</button>
+    </div>
+
+    <div id="runs-table-wrap">
+      <div class="empty-state" id="runs-empty">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/>
+        </svg>
+        <p>Aucun run pour l'instant.</p>
+      </div>
+      <table id="runs-table" style="display:none">
+        <thead>
+          <tr>
+            <th>Run ID</th>
+            <th>Topic</th>
+            <th>Statut</th>
+            <th>Démarré</th>
+            <th>Terminé</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="runs-tbody"></tbody>
+      </table>
+    </div>
+
+    <!-- SSE log panel -->
+    <div class="log-panel">
+      <div class="log-panel-header">
+        <span>Log pipeline</span>
+        <span id="log-run-id">—</span>
+        <div style="flex:1"></div>
+        <button class="btn btn-secondary" onclick="clearLog()" style="font-size:.72rem;padding:.25rem .6rem">Effacer</button>
+      </div>
+      <div id="log-output">
+        <div class="log-entry" style="color:var(--muted)">En attente d'un run…</div>
+      </div>
+    </div>
+
+  </div>
+</main>
+
+<div id="toast"></div>
+
+<script>
+  // ---- State ----
+  let selectedTopic = null;
+  let activeEvtSource = null;
+  let activeRunId = null;
+
+  // ---- On load ----
+  window.addEventListener('DOMContentLoaded', () => {
+    loadTrends();
+    loadRuns();
+    setInterval(loadRuns, 15000);
+  });
+
+  // ---- Trend loading ----
+  async function loadTrends(force = false) {
+    const btn = document.getElementById('btn-refresh-trends');
+    btn.disabled = true;
+    btn.textContent = '↻ Chargement…';
+    try {
+      const res = await fetch(`/trends${force ? '?force_refresh=true' : ''}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      renderTopics(data.topics);
+      showToast(`${data.topics.length} tendances chargées`, 'success');
+    } catch (e) {
+      showToast(`Erreur trends: ${e.message}`, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '↻ Actualiser les trends';
+    }
+  }
+
+  function renderTopics(topics) {
+    const list = document.getElementById('topics-list');
+    if (!topics || topics.length === 0) {
+      list.innerHTML = '<div class="empty-state" style="padding:2rem"><p style="font-size:.8rem">Aucune tendance trouvée.</p></div>';
+      return;
+    }
+    list.innerHTML = topics.map(t => `
+      <div class="topic-item" onclick="selectTopic(this, '${escHtml(t.topic)}')" data-topic="${escHtml(t.topic)}">
+        <div>
+          <div class="topic-text">${escHtml(t.topic)}</div>
+          <div class="topic-sources">${(t.sources || []).join(' · ')}</div>
+        </div>
+        <div class="topic-score">${(t.score * 100).toFixed(1)}%</div>
+      </div>
+    `).join('');
+  }
+
+  function selectTopic(el, topic) {
+    document.querySelectorAll('.topic-item').forEach(i => i.classList.remove('selected'));
+    el.classList.add('selected');
+    selectedTopic = topic;
+    document.getElementById('input-topic').value = topic;
+  }
+
+  // ---- Generate ----
+  async function startGenerate() {
+    const topic = document.getElementById('input-topic').value.trim() || null;
+    const upload = document.getElementById('input-upload').checked;
+    const publishAtRaw = document.getElementById('input-publish-at').value;
+    let publishAt = null;
+    if (publishAtRaw) {
+      publishAt = new Date(publishAtRaw).toISOString();
+    }
+
+    const btn = document.getElementById('btn-generate');
+    btn.disabled = true;
+    btn.textContent = '⏳ Lancement…';
+
+    try {
+      const res = await fetch('/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ topic, upload, publish_at: publishAt }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      showToast(`Run ${data.run_id} démarré`, 'success');
+      openSSEStream(data.run_id);
+      setTimeout(loadRuns, 500);
+    } catch (e) {
+      showToast(`Erreur: ${e.message}`, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '▶ Lancer le pipeline';
+    }
+  }
+
+  // ---- SSE stream ----
+  function openSSEStream(runId) {
+    if (activeEvtSource) { activeEvtSource.close(); }
+    activeRunId = runId;
+    document.getElementById('log-run-id').textContent = runId;
+    clearLog(false);
+    appendLog('info', 'system', `Connexion au stream du run ${runId}…`);
+
+    const pulse = document.getElementById('pulse-indicator');
+    const label = document.getElementById('status-label');
+    pulse.classList.remove('idle');
+    label.textContent = 'En cours…';
+
+    activeEvtSource = new EventSource(`/status/${runId}`);
+
+    const stageLabels = {
+      trends_start: 'Trends…', trends_done: 'Trends OK',
+      script_start: 'Script…', script_done: 'Script OK',
+      video_start: 'Vidéo…',  video_done: 'Vidéo OK',
+      audio_start: 'Audio…',  audio_done: 'Audio OK',
+      postprod_start: 'Post-prod…', postprod_done: 'Post-prod OK',
+      upload_start: 'Upload…', upload_done: 'Upload OK',
+      done: '✓ Terminé', error: '✗ Erreur',
+    };
+
+    const allStages = ['trends','script','video','audio','postprod','upload'];
+    allStages.forEach(s => {
+      activeEvtSource.addEventListener(`${s}_start`, e => handleSSEEvent(e, s, stageLabels));
+      activeEvtSource.addEventListener(`${s}_done`,  e => handleSSEEvent(e, s, stageLabels));
+    });
+    activeEvtSource.addEventListener('done',  e => handleSSEDone(e));
+    activeEvtSource.addEventListener('error', e => handleSSEError(e));
+    activeEvtSource.addEventListener('heartbeat', () => {});
+
+    activeEvtSource.onerror = () => {
+      appendLog('error', 'stream', 'Connexion SSE perdue.');
+      pulse.classList.add('idle');
+      label.textContent = 'Idle';
+    };
+  }
+
+  function handleSSEEvent(e, stage, labels) {
+    try {
+      const data = JSON.parse(e.data);
+      const msg = Object.entries(data.data || {}).map(([k,v]) => `${k}=${v}`).join(' ') || '';
+      appendLog('info', labels[data.stage] || data.stage, msg);
+    } catch {}
+  }
+
+  function handleSSEDone(e) {
+    try {
+      const data = JSON.parse(e.data);
+      appendLog('done', 'done', `Run terminé — ${data.data?.final_video || ''}`);
+    } catch {
+      appendLog('done', 'done', 'Run terminé');
+    }
+    const pulse = document.getElementById('pulse-indicator');
+    pulse.classList.add('idle');
+    document.getElementById('status-label').textContent = 'Idle';
+    if (activeEvtSource) { activeEvtSource.close(); activeEvtSource = null; }
+    loadRuns();
+  }
+
+  function handleSSEError(e) {
+    try {
+      const data = JSON.parse(e.data);
+      appendLog('error', 'error', data.data?.message || 'Erreur inconnue');
+    } catch {
+      appendLog('error', 'error', 'Erreur pipeline');
+    }
+    const pulse = document.getElementById('pulse-indicator');
+    pulse.classList.add('idle');
+    document.getElementById('status-label').textContent = 'Erreur';
+    if (activeEvtSource) { activeEvtSource.close(); activeEvtSource = null; }
+    loadRuns();
+  }
+
+  // ---- Runs table ----
+  async function loadRuns() {
+    try {
+      const res = await fetch('/runs');
+      if (!res.ok) return;
+      const runs = await res.json();
+      renderRunsTable(runs);
+    } catch {}
+  }
+
+  function renderRunsTable(runs) {
+    const tbody = document.getElementById('runs-tbody');
+    const empty = document.getElementById('runs-empty');
+    const table = document.getElementById('runs-table');
+
+    if (!runs || runs.length === 0) {
+      empty.style.display = 'flex';
+      table.style.display = 'none';
+      return;
+    }
+    empty.style.display = 'none';
+    table.style.display = 'table';
+
+    tbody.innerHTML = runs.map(r => {
+      const statusClass = `status-${r.status || 'started'}`;
+      const startedFmt = r.started_at ? new Date(r.started_at).toLocaleString('fr-FR') : '—';
+      const finishedFmt = r.finished_at ? new Date(r.finished_at).toLocaleString('fr-FR') : '—';
+      const previewBtn = r.status === 'success'
+        ? `<a href="/player?run_id=${r.run_id}" target="_blank" class="btn btn-primary" style="font-size:.75rem;padding:.25rem .6rem;text-decoration:none">▶ Preview</a>`
+        : '';
+      const sseBtn = (r.status === 'started' || r.status === 'running')
+        ? `<button class="btn btn-secondary" onclick="openSSEStream('${r.run_id}')" style="font-size:.75rem;padding:.25rem .6rem">📡 Log</button>`
+        : '';
+      return `
+        <tr>
+          <td class="run-id-cell">${escHtml(r.run_id || '—')}</td>
+          <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.topic || '—')}</td>
+          <td><span class="status-pill ${statusClass}">${escHtml(r.status || '?')}</span></td>
+          <td style="font-size:.78rem;color:var(--muted)">${startedFmt}</td>
+          <td style="font-size:.78rem;color:var(--muted)">${finishedFmt}</td>
+          <td style="display:flex;gap:.4rem;flex-wrap:wrap">${previewBtn}${sseBtn}</td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  // ---- Log helpers ----
+  function appendLog(type, stage, msg) {
+    const out = document.getElementById('log-output');
+    const ts = new Date().toLocaleTimeString('fr-FR');
+    const el = document.createElement('div');
+    el.className = `log-entry log-${type}`;
+    el.innerHTML = `<span class="log-ts">${ts}</span><span class="log-stage">${escHtml(stage)}</span><span class="log-msg">${escHtml(String(msg))}</span>`;
+    out.appendChild(el);
+    out.scrollTop = out.scrollHeight;
+  }
+
+  function clearLog(addSep = true) {
+    const out = document.getElementById('log-output');
+    out.innerHTML = '';
+    if (addSep) appendLog('info', 'system', '— Log effacé —');
+  }
+
+  // ---- Toast ----
+  function showToast(msg, type = 'info') {
+    const toast = document.getElementById('toast');
+    const colors = { success: '#22c55e', error: '#ef4444', info: '#5b8dee' };
+    toast.style.borderLeftColor = colors[type] || colors.info;
+    toast.style.borderLeftWidth = '4px';
+    toast.textContent = msg;
+    toast.classList.add('show');
+    setTimeout(() => toast.classList.remove('show'), 3500);
+  }
+
+  // ---- Utils ----
+  function escHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+</script>
+</body>
+</html>

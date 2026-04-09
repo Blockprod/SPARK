@@ -1,0 +1,2 @@
+# JSON run logs are written here by pipeline.py
+# Each run produces: run_<id>.jsonl and run_<id>_manifest.json

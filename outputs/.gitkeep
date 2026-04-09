@@ -1,0 +1,8 @@
+# Generated clips, audio, renders and temp files go here.
+# Sub-directories are created at runtime by each pipeline stage.
+#
+# Structure:
+#   outputs/clips/    — per-scene MP4 clips from video_gen
+#   outputs/audio/    — per-scene WAV + full narration from audio_gen
+#   outputs/renders/  — final assembled MP4 from post_prod
+#   outputs/tmp/      — concat lists, intermediate files
