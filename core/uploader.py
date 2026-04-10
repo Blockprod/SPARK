@@ -8,11 +8,20 @@ and optional scheduled publishing via publishAt.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+try:
+    from cryptography.fernet import Fernet, InvalidToken as _FernetInvalidToken
+    _FERNET_AVAILABLE = True
+except ImportError:  # cryptography not installed — encryption disabled
+    _FERNET_AVAILABLE = False
+    _FernetInvalidToken = Exception  # type: ignore[assignment,misc]
 
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -203,6 +212,11 @@ class YouTubeUploader:
                         "Transient HTTP %d during upload — retrying.", exc.resp.status
                     )
                     continue
+                if exc.resp.status == 403 and "quotaExceeded" in str(exc):
+                    raise UploaderError(
+                        "QUOTA_EXCEEDED — limite YouTube 10k unités/jour atteinte. "
+                        "Réessai possible après 00:00 UTC."
+                    ) from exc
                 raise UploaderError(
                     f"YouTube API error during upload: {exc}"
                 ) from exc
@@ -237,9 +251,21 @@ class YouTubeUploader:
 
         if self.cfg.token_file.exists():
             try:
-                creds = Credentials.from_authorized_user_file(
-                    str(self.cfg.token_file), YOUTUBE_SCOPES
-                )
+                raw = self.cfg.token_file.read_bytes()
+                fernet = self._get_fernet()
+                if fernet:
+                    try:
+                        raw = fernet.decrypt(raw)
+                    except _FernetInvalidToken:
+                        LOGGER.warning(
+                            "Token at %s could not be decrypted — will re-authenticate.",
+                            self.cfg.token_file,
+                        )
+                        raw = b""
+                if raw:
+                    creds = Credentials.from_authorized_user_info(
+                        json.loads(raw.decode("utf-8")), YOUTUBE_SCOPES
+                    )
             except Exception as exc:
                 LOGGER.warning(
                     "Could not load token from %s: %s — will re-authenticate.",
@@ -276,12 +302,33 @@ class YouTubeUploader:
 
         return creds
 
+    def _get_fernet(self) -> "Fernet | None":
+        """Return a Fernet instance if TOKEN_ENCRYPTION_KEY is set, else None."""
+        if not _FERNET_AVAILABLE:
+            return None
+        key = os.environ.get("TOKEN_ENCRYPTION_KEY", "").strip()
+        if not key:
+            return None
+        try:
+            from cryptography.fernet import Fernet
+            return Fernet(key.encode())
+        except Exception as exc:
+            LOGGER.warning("Invalid TOKEN_ENCRYPTION_KEY — token stored unencrypted: %s", exc)
+            return None
+
     def _save_token(self, creds: Credentials) -> None:
         try:
             self.cfg.token_file.parent.mkdir(parents=True, exist_ok=True)
-            self.cfg.token_file.write_text(
-                creds.to_json(), encoding="utf-8"
-            )
+            data: bytes = creds.to_json().encode("utf-8")
+            fernet = self._get_fernet()
+            if fernet:
+                data = fernet.encrypt(data)
+            self.cfg.token_file.write_bytes(data)
+            import stat
+            try:
+                self.cfg.token_file.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+            except NotImplementedError:
+                pass  # Windows — no-op
             LOGGER.debug("OAuth2 token saved → %s", self.cfg.token_file)
         except Exception as exc:
             LOGGER.warning("Could not persist token to %s: %s", self.cfg.token_file, exc)
@@ -329,7 +376,7 @@ def _build_video_metadata(
     if len(title) > 100:
         title = title[:97] + "…"
 
-    description = str(meta.get("youtube_description", "")).strip()
+    description = str(meta.get("youtube_description", "")).strip()[:5000]
     if not description:
         description = str(script_payload.get("hook", "")).strip()
 
@@ -338,6 +385,15 @@ def _build_video_metadata(
         merged_tags = list(dict.fromkeys(payload_tags + default_tags))
     else:
         merged_tags = list(default_tags)
+
+    _truncated_tags: list[str] = []
+    _tags_total_chars = 0
+    for _tag in merged_tags:
+        _sep = 1 if _truncated_tags else 0
+        if _tags_total_chars + len(_tag) + _sep > 500:
+            break
+        _tags_total_chars += len(_tag) + _sep
+        _truncated_tags.append(_tag)
 
     actual_privacy = privacy_status
     status_body: dict[str, Any] = {
@@ -355,7 +411,7 @@ def _build_video_metadata(
         "snippet": {
             "title": title,
             "description": description,
-            "tags": merged_tags[:500],
+            "tags": _truncated_tags,
             "categoryId": str(category_id),
             "defaultLanguage": str(script_payload.get("language", "fr")),
             "defaultAudioLanguage": str(script_payload.get("language", "fr")),
@@ -367,6 +423,94 @@ def _build_video_metadata(
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+async def check_video_status(
+    config: dict[str, Any],
+    env: dict[str, str],
+    video_id: str,
+) -> dict[str, Any]:
+    """Check the upload status and content rating of a published video.
+
+    Intended to be called ~24h after upload to detect copyright claims or
+    processing failures. Logs a critical warning if a claim is detected.
+
+    Args:
+        config: Full global config mapping loaded from config.yaml.
+        env: Environment mapping with YouTube credentials.
+        video_id: YouTube video ID to check.
+
+    Returns:
+        Dictionary with keys:
+          - video_id (str)
+          - upload_status (str)
+          - privacy_status (str)
+          - content_rating (dict)
+          - has_claim (bool)
+
+    Raises:
+        UploaderError: On credential or API failure.
+    """
+    if not video_id or not video_id.strip():
+        raise UploaderError("video_id must be a non-empty string.")
+
+    cfg = UploaderConfig.from_mapping(config, env)
+    uploader = YouTubeUploader(cfg=cfg)
+
+    def _check_sync() -> dict[str, Any]:
+        service = uploader._get_service()
+        try:
+            response = (
+                service.videos()
+                .list(part="status,contentDetails", id=video_id)
+                .execute()
+            )
+        except HttpError as exc:
+            raise UploaderError(
+                f"YouTube API error checking video {video_id}: {exc}"
+            ) from exc
+
+        items = response.get("items", [])
+        if not items:
+            LOGGER.warning("Video %s not found in YouTube API response.", video_id)
+            return {
+                "video_id": video_id,
+                "upload_status": "not_found",
+                "privacy_status": "",
+                "content_rating": {},
+                "has_claim": False,
+            }
+
+        item = items[0]
+        status = item.get("status", {})
+        content_details = item.get("contentDetails", {})
+        content_rating = content_details.get("contentRating", {})
+        upload_status = status.get("uploadStatus", "")
+        privacy_status = status.get("privacyStatus", "")
+        has_claim = bool(content_rating)
+
+        if upload_status == "rejected":
+            LOGGER.critical(
+                "⚠️ Video %s was REJECTED by YouTube (uploadStatus=rejected). "
+                "Check YouTube Studio for details.",
+                video_id,
+            )
+        if has_claim:
+            LOGGER.critical(
+                "⚠️ Video %s has a CONTENT RATING / COPYRIGHT CLAIM: %s",
+                video_id,
+                content_rating,
+            )
+
+        return {
+            "video_id": video_id,
+            "upload_status": upload_status,
+            "privacy_status": privacy_status,
+            "content_rating": content_rating,
+            "has_claim": has_claim,
+        }
+
+    return await asyncio.to_thread(_check_sync)
 
 
 async def upload_to_youtube(
@@ -400,3 +544,24 @@ async def upload_to_youtube(
         publish_at=publish_at,
     )
     return response
+
+
+def get_youtube_service(config: dict[str, Any], env: dict[str, str]) -> Any:
+    """Return an authenticated YouTube API service object.
+
+    Convenience function for callers that need the service without running
+    a full upload (e.g. thumbnail upload).
+
+    Args:
+        config: Full global config mapping loaded from config.yaml.
+        env: Environment mapping with YouTube credential paths.
+
+    Returns:
+        Authenticated googleapiclient.discovery Resource for YouTube v3.
+
+    Raises:
+        UploaderError: On credential or API failure.
+    """
+    cfg = UploaderConfig.from_mapping(config, env)
+    uploader = YouTubeUploader(cfg=cfg)
+    return uploader._get_service()

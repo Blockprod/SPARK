@@ -7,11 +7,13 @@ computes a weighted score, and returns ranked topics for downstream script gener
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from pytrends.request import TrendReq
@@ -126,15 +128,20 @@ class TrendHunter:
     _MIN_TOPIC_LEN = 4
     _MAX_TOPIC_LEN = 80
 
-    def __init__(self, cfg: TrendHunterConfig, env: dict[str, str] | None = None) -> None:
+    def __init__(self, cfg: TrendHunterConfig, env: dict[str, str] | None = None, logs_dir: Path | None = None) -> None:
         """Initialize the trend hunter.
 
         Args:
             cfg: Parsed trend configuration.
             env: Environment mapping, typically `os.environ` or a test dictionary.
+            logs_dir: Optional override for the directory containing
+                      ``publish_history.jsonl``.  When provided, takes precedence
+                      over the ``LOGS_DIR`` environment variable.  Useful for
+                      injecting a temporary directory in unit tests.
         """
         self.cfg = cfg
         self.env = env or {}
+        self._logs_dir = logs_dir
 
     async def discover_topics(self, limit: int = 20) -> list[dict[str, Any]]:
         """Return ranked topic candidates.
@@ -178,7 +185,65 @@ class TrendHunter:
 
         merged = self._merge_signals(google_signals, reddit_signals)
         ranked = self._rank_signals(merged)
+        ranked = self._exclude_recent_topics(ranked, self.env)
         return ranked[: max(1, limit)]
+
+    def _exclude_recent_topics(
+        self,
+        ranked: list[dict[str, Any]],
+        env: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        """Remove topics already produced in the last 14 days from the ranking.
+
+        Reads logs/publish_history.jsonl (path derived from env LOGS_DIR or default).
+        If the file is absent or unreadable, returns ranked unchanged.
+
+        Args:
+            ranked: Sorted topic list from _rank_signals.
+            env: Environment mapping (may contain LOGS_DIR override).
+
+        Returns:
+            Filtered ranked list with recently produced topics removed.
+        """
+        from core.history import read_publish_history
+
+        logs_dir = (
+            self._logs_dir
+            if self._logs_dir is not None
+            else Path(env.get("LOGS_DIR", "./logs")).resolve()
+        )
+        cutoff = datetime.now(timezone.utc) - timedelta(days=14)
+        recent_topics: set[str] = set()
+
+        for entry in read_publish_history(logs_dir):
+            published_at_str = entry.get("published_at", "")
+            if not published_at_str:
+                continue
+            try:
+                published_at = datetime.fromisoformat(
+                    published_at_str.replace("Z", "+00:00")
+                )
+            except ValueError:
+                continue
+            if published_at >= cutoff:
+                topic = entry.get("topic", "")
+                if topic:
+                    recent_topics.add(self._canonical_topic(topic))
+
+        if not recent_topics:
+            return ranked
+
+        filtered = [
+            t for t in ranked
+            if self._canonical_topic(t.get("topic", "")) not in recent_topics
+        ]
+        excluded = len(ranked) - len(filtered)
+        if excluded:
+            LOGGER.info(
+                "Deduplication: excluded %d topic(s) produced in the last 14 days.",
+                excluded,
+            )
+        return filtered
 
     async def fetch_google_trends(self) -> dict[str, TopicSignal]:
         """Fetch candidate topics and metrics from Google Trends.
@@ -411,6 +476,9 @@ class TrendHunter:
         normalized_reddit_engagement = self._normalize([item.reddit_engagement for item in topics])
 
         weights = self.cfg.scoring_weights
+        # Load historical performance bonus map (topic_keyword → bonus 0.0–0.15)
+        perf_bonus = self._load_performance_bonus()
+
         ranked: list[dict[str, Any]] = []
 
         for index, item in enumerate(topics):
@@ -421,10 +489,15 @@ class TrendHunter:
                 + normalized_reddit_engagement[index] * weights["reddit_engagement"]
             )
 
+            # Apply performance bonus: reward topics whose keyword segments
+            # appeared in historically high-retention videos.
+            bonus = self._compute_topic_bonus(item.topic, perf_bonus)
+            score = round(score + bonus, 4)
+
             ranked.append(
                 {
                     "topic": item.topic,
-                    "score": round(score, 4),
+                    "score": score,
                     "signals": {
                         "google_volume": round(item.google_volume, 3),
                         "google_momentum": round(item.google_momentum, 3),
@@ -437,6 +510,76 @@ class TrendHunter:
 
         ranked.sort(key=lambda x: x["score"], reverse=True)
         return ranked
+
+    def _load_performance_bonus(self) -> dict[str, float]:
+        """Read analytics_cache.jsonl and build a keyword → performance bonus map.
+
+        The bonus is a value in [0.0, 0.15] derived from ``avg_view_percentage``
+        (0 % → bonus 0.0, 100 % → bonus 0.15).  Topics with no analytics data
+        receive no bonus.
+
+        Returns:
+            Mapping from lowercased keyword to float bonus value.
+        """
+        logs_dir = Path(self.env.get("LOGS_DIR", "./logs")).resolve()
+        cache_path = logs_dir / "analytics_cache.jsonl"
+        if not cache_path.exists():
+            return {}
+
+        keyword_stats: dict[str, list[float]] = {}
+        try:
+            with cache_path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    avg_vp = entry.get("avg_view_percentage")
+                    topic = entry.get("topic", "")
+                    if avg_vp is None or not topic:
+                        continue
+                    try:
+                        score_val = float(avg_vp)
+                    except (TypeError, ValueError):
+                        continue
+                    # Tokenise topic into keywords for fuzzy matching
+                    for kw in re.split(r"[\s\-_]+", topic.lower()):
+                        kw = kw.strip()
+                        if len(kw) >= 4:
+                            keyword_stats.setdefault(kw, []).append(score_val)
+        except Exception as exc:
+            LOGGER.warning("Could not read analytics_cache.jsonl for perf bonus: %s", exc)
+            return {}
+
+        # Aggregate: average avg_view_percentage per keyword, map to [0, 0.15] bonus
+        bonus_map: dict[str, float] = {}
+        for kw, values in keyword_stats.items():
+            mean_vp = sum(values) / len(values)
+            bonus_map[kw] = round(min(0.15, mean_vp / 100.0 * 0.15), 5)
+
+        return bonus_map
+
+    def _compute_topic_bonus(self, topic: str, perf_bonus: dict[str, float]) -> float:
+        """Return the maximum performance bonus applicable to a topic string.
+
+        Args:
+            topic: Raw topic string.
+            perf_bonus: Keyword → bonus mapping from _load_performance_bonus.
+
+        Returns:
+            Maximum bonus value across all matching keywords (0.0 if none).
+        """
+        if not perf_bonus:
+            return 0.0
+        best = 0.0
+        for kw in re.split(r"[\s\-_]+", topic.lower()):
+            kw = kw.strip()
+            if kw in perf_bonus:
+                best = max(best, perf_bonus[kw])
+        return best
 
     def _normalize(self, values: list[float]) -> list[float]:
         if not values:

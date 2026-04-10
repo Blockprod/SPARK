@@ -173,6 +173,7 @@ async def _stage_script(
         raise PipelineError(f"Script generation failed: {exc}") from exc
     run_ctx["scenes"] = len(payload.get("scenes", []))
     run_ctx["duration_sec"] = payload.get("duration_sec", 0)
+    run_ctx["script_payload"] = payload
     LOGGER.info(
         "[script] Script ready: %d scenes, %ds.",
         run_ctx["scenes"],
@@ -275,6 +276,30 @@ async def _stage_upload(
     run_ctx["youtube_url"] = f"https://youtu.be/{video_id}"
     LOGGER.info("[upload] Published: https://youtu.be/%s", video_id)
     return response
+
+
+async def _stage_thumbnail(
+    config: dict[str, Any],
+    env: dict[str, str],
+    clip_paths: list[Path],
+    script_payload: dict[str, Any],
+    video_id: str,
+    run_ctx: dict[str, Any],
+) -> None:
+    from core.thumbnail_gen import generate_and_upload_thumbnail, ThumbnailError
+
+    LOGGER.info("[thumbnail] Generating and uploading thumbnail…")
+    try:
+        jpeg_path = await generate_and_upload_thumbnail(
+            config=config,
+            env=env,
+            clip_paths=clip_paths,
+            script_payload=script_payload,
+            video_id=video_id,
+        )
+        run_ctx["thumbnail_path"] = jpeg_path
+    except ThumbnailError as exc:
+        LOGGER.warning("[thumbnail] Skipped (non-fatal): %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +406,13 @@ async def run_pipeline(
             )
             run_ctx["upload_response"] = upload_response
             await _progress("upload_done", {"youtube_url": run_ctx.get("youtube_url", "")})
+
+            # Stage 7 — Thumbnail (non-fatal, only when upload succeeded)
+            video_id = run_ctx.get("youtube_video_id", "")
+            if video_id:
+                await _stage_thumbnail(
+                    config, env, clip_paths, script_payload, video_id, run_ctx
+                )
         else:
             LOGGER.info("[upload] Skipped (upload=False, AUTO_UPLOAD not set).")
 
@@ -397,15 +429,42 @@ async def run_pipeline(
 
     finally:
         _write_run_manifest(config, run_id, run_ctx)
+        keep = config.get("pipeline", {}).get("keep_intermediate_files", False)
+        if not keep:
+            _cleanup_intermediate_files(run_id, config)
 
     LOGGER.info("=== Pipeline run %s completed (%s) ===", run_id, run_ctx["status"])
     return run_ctx
+
+
+def _cleanup_intermediate_files(run_id: str, config: dict[str, Any]) -> None:
+    """Delete partial clip and audio files generated during a run.
+
+    Called from the finally block when keep_intermediate_files is False.
+    """
+    outputs_dir = Path(
+        str(config.get("paths", {}).get("outputs_dir", "./outputs"))
+    ).resolve()
+    patterns = [
+        f"{run_id}_scene*.mp4",
+        f"{run_id}_scene*.wav",
+        f"{run_id}_narration_full.wav",
+    ]
+    for pattern in patterns:
+        for f in outputs_dir.glob(pattern):
+            try:
+                f.unlink(missing_ok=True)
+            except Exception as exc:
+                LOGGER.debug("Could not remove intermediate file %s: %s", f, exc)
 
 
 def _write_run_manifest(
     config: dict[str, Any], run_id: str, run_ctx: dict[str, Any]
 ) -> None:
     """Persist the run context as a JSON manifest in the logs directory.
+
+    Also appends a compact entry to publish_history.jsonl for deduplication
+    and quota tracking by downstream modules.
 
     Args:
         config: Global app config (for logs dir path).
@@ -424,6 +483,26 @@ def _write_run_manifest(
         )
     except Exception as exc:
         LOGGER.warning("Could not write run manifest: %s", exc)
+
+    # Append to publish_history.jsonl only for successful uploads.
+    if run_ctx.get("status") == "success":
+        try:
+            logs_dir = Path(
+                str(config.get("paths", {}).get("logs_dir", "./logs"))
+            ).resolve()
+            history_path = logs_dir / "publish_history.jsonl"
+            entry = {
+                "run_id": run_id,
+                "topic": run_ctx.get("topic", ""),
+                "video_id": run_ctx.get("youtube_video_id", ""),
+                "published_at": run_ctx.get("finished_at", ""),
+                "status": "success",
+                "status_checked": False,
+            }
+            with history_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            LOGGER.warning("Could not append to publish_history.jsonl: %s", exc)
 
 
 # ---------------------------------------------------------------------------

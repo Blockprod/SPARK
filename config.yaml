@@ -34,10 +34,11 @@ pipeline:
   target_height: 1920
   target_fps: 24
 
-  # Flow controls
-  parallel_scene_generation: false
-  keep_intermediate_files: true
-  fail_fast: true
+  # Concurrency guard: maximum simultaneous pipeline runs (avoids GPU OOM)
+  max_concurrent_runs: 1
+
+  # Flow controls — reserved for future parallelism and cleanup flags
+  keep_intermediate_files: false  # set true to preserve clips/audio after each run
 
 trends:
   # Weighted score for ranking candidate topics
@@ -73,6 +74,12 @@ script_generation:
   top_p: 0.95
   max_output_tokens: 4096
 
+  # Narrative templates rotated at each run to avoid repetition
+  template_pool:
+    - revelation
+    - parallele_inverse
+    - countdown
+
   # Output contract expected from LLM
   output_format: strict_json
   narration_style: "historique, pedagogique, vivant"
@@ -93,7 +100,7 @@ video_generation:
 
   scenes:
     max_scene_duration_sec: 10
-    transition: hard_cut
+    # transition: hard_cut is implicit — post_prod.py uses hard cuts only
 
   coherence:
     enable_image_conditioning: true
@@ -112,9 +119,10 @@ audio_generation:
     output_format: wav
 
   # Prepared for future online swap without changing pipeline contract
+  # Backend selection is controlled by active_backend above, not by an enabled flag
   voxtral:
-    enabled: false
-    model: ""
+    model: "mistral-tts-latest"
+    voice: "fr_female"
 
 post_production:
   ffmpeg:
@@ -146,7 +154,7 @@ uploader:
   provider: youtube_data_api_v3
   default_privacy_status: private
   notify_subscribers: false
-  category_id: 27
+  category_id: 28
   default_tags:
     - IA
     - Histoire
@@ -160,6 +168,7 @@ scheduler:
   max_workers: 4
   misfire_grace_time_sec: 300
   coalesce: true
+  max_shorts_per_week: 7
 
   # Peak slots for FR Shorts audience (can be tuned from dashboard later)
   default_publish_slots:
@@ -170,6 +179,7 @@ scheduler:
 dashboard:
   host: 127.0.0.1
   port: 8000
+  trends_cache_ttl_minutes: 10
   sse_heartbeat_sec: 5
   allow_origins:
     - http://127.0.0.1:8000

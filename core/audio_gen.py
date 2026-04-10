@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import struct
+import wave
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +48,7 @@ class AudioGenConfig:
     # Voxtral (future)
     voxtral_enabled: bool
     voxtral_model: str
+    voxtral_voice: str
 
     # Outputs
     audio_dir: Path
@@ -90,6 +93,7 @@ class AudioGenConfig:
             kokoro_output_format=str(kokoro_cfg.get("output_format", "wav")),
             voxtral_enabled=bool(voxtral_cfg.get("enabled", False)),
             voxtral_model=str(voxtral_cfg.get("model", "")),
+            voxtral_voice=str(voxtral_cfg.get("voice", "fr_female")),
             audio_dir=audio_dir,
         )
 
@@ -236,7 +240,10 @@ class VoxtralBackend(TTSBackend):
         self._model = model
 
     async def synthesize(self, text: str, output_path: Path) -> Path:
-        """Synthesize via Voxtral API (Mistral).
+        """Synthesize via Voxtral TTS API (Mistral).
+
+        Calls POST https://api.mistral.ai/v1/audio/speech with the configured
+        model and voice, writes PCM audio to a WAV file at *output_path*.
 
         Args:
             text: Plain French narration text.
@@ -246,12 +253,73 @@ class VoxtralBackend(TTSBackend):
             Path to the written WAV file.
 
         Raises:
-            AudioGenerationError: API not yet available.
+            AudioGenerationError: On empty text, API error, or I/O failure.
         """
-        raise AudioGenerationError(
-            "Voxtral backend is not yet available. "
-            "Set active_backend=kokoro in config.yaml until Voxtral API access is granted."
-        )
+        if not text or not text.strip():
+            raise AudioGenerationError("Cannot synthesize empty narration text.")
+
+        def _run() -> Path:
+            import urllib.request
+            import urllib.error
+
+            payload = {
+                "model": self._model,
+                "input": text.strip(),
+                "voice": self.cfg.voxtral_voice,
+                "response_format": "pcm",
+                "sample_rate": self.cfg.kokoro_sample_rate,
+            }
+            import json as _json
+            body = _json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                "https://api.mistral.ai/v1/audio/speech",
+                data=body,
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                    "Accept": "audio/pcm",
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    pcm_bytes: bytes = resp.read()
+            except urllib.error.HTTPError as exc:
+                raise AudioGenerationError(
+                    f"Voxtral API HTTP error {exc.code}: {exc.reason}"
+                ) from exc
+            except urllib.error.URLError as exc:
+                raise AudioGenerationError(
+                    f"Voxtral API connection error: {exc.reason}"
+                ) from exc
+
+            if not pcm_bytes:
+                raise AudioGenerationError("Voxtral API returned empty audio bytes.")
+
+            # Write PCM bytes as a standard WAV file.
+            sample_rate = self.cfg.kokoro_sample_rate
+            n_channels = 1
+            sampwidth = 2  # 16-bit PCM
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with wave.open(str(output_path), "wb") as wf:
+                    wf.setnchannels(n_channels)
+                    wf.setsampwidth(sampwidth)
+                    wf.setframerate(sample_rate)
+                    wf.writeframes(pcm_bytes)
+            except Exception as exc:
+                raise AudioGenerationError(
+                    f"Failed to write Voxtral WAV to {output_path}: {exc}"
+                ) from exc
+
+            LOGGER.debug(
+                "Voxtral wrote %s (%.2fs)",
+                output_path,
+                len(pcm_bytes) / (sample_rate * n_channels * sampwidth),
+            )
+            return output_path
+
+        return await asyncio.to_thread(_run)
 
 
 # ---------------------------------------------------------------------------

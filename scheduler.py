@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import signal
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -65,6 +67,19 @@ async def _scheduled_pipeline_job(
 
     auto_upload = env.get("AUTO_UPLOAD", "false").lower() in {"true", "1"}
 
+    # Weekly quota guard: enforce max_shorts_per_week from config.
+    sched_cfg = config.get("scheduler", {})
+    max_per_week = int(sched_cfg.get("max_shorts_per_week", 7))
+    current_week_count = _count_shorts_this_week(config)
+    if current_week_count >= max_per_week:
+        LOGGER.warning(
+            "Weekly quota reached (%d/%d Shorts) — scheduled job for slot '%s' skipped.",
+            current_week_count,
+            max_per_week,
+            slot_label,
+        )
+        return
+
     LOGGER.info(
         "Scheduled run triggered for slot '%s' (auto_upload=%s).",
         slot_label,
@@ -86,6 +101,46 @@ async def _scheduled_pipeline_job(
         )
     except Exception as exc:
         LOGGER.error("Scheduled pipeline run failed: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Weekly quota helper
+# ---------------------------------------------------------------------------
+
+
+def _count_shorts_this_week(config: dict[str, Any]) -> int:
+    """Count successful pipeline runs published in the last 7 days.
+
+    Reads logs/publish_history.jsonl. Returns 0 if the file is absent or unreadable.
+
+    Args:
+        config: Global app config (for logs dir path).
+
+    Returns:
+        Number of successful Shorts published within the past 7 days.
+    """
+    from core.history import read_publish_history
+
+    logs_dir = Path(
+        str(config.get("paths", {}).get("logs_dir", "./logs"))
+    ).resolve()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    count = 0
+    for entry in read_publish_history(logs_dir):
+        if entry.get("status") != "success":
+            continue
+        published_at_str = entry.get("published_at", "")
+        if not published_at_str:
+            continue
+        try:
+            published_at = datetime.fromisoformat(
+                published_at_str.replace("Z", "+00:00")
+            )
+        except ValueError:
+            continue
+        if published_at >= cutoff:
+            count += 1
+    return count
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +245,7 @@ def _install_signal_handlers(
 
     def _handle_stop(signame: str) -> None:
         LOGGER.info("Received %s — shutting down scheduler…", signame)
-        scheduler.shutdown(wait=False)
+        scheduler.shutdown(wait=True)
         loop.stop()
 
     for sig in (signal.SIGINT, signal.SIGTERM):

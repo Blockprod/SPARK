@@ -11,18 +11,26 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
+import random
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import google.generativeai as genai
-from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import AsyncRetrying, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 LOGGER = logging.getLogger(__name__)
 
 
 class ScriptGenerationError(RuntimeError):
     """Raised when script generation or validation fails."""
+
+
+class ScriptValidationError(ScriptGenerationError):
+    """Raised when Gemini output fails schema or structural validation.
+
+    These errors are deterministic and must NOT be retried by tenacity.
+    """
 
 
 @dataclass(slots=True)
@@ -37,6 +45,7 @@ class ScriptGenConfig:
     max_duration_sec: int
     max_scenes: int
     prompts_dir: Path
+    template_pool: list[str] = field(default_factory=lambda: ["revelation", "parallele_inverse", "countdown"])
 
     @classmethod
     def from_mapping(cls, config: dict[str, Any]) -> "ScriptGenConfig":
@@ -64,6 +73,13 @@ class ScriptGenConfig:
 
         prompts_dir = Path(str(paths_cfg.get("prompts_dir", "./prompts"))).resolve()
 
+        raw_pool = script_cfg.get("template_pool", [])
+        template_pool = (
+            [str(t) for t in raw_pool]
+            if isinstance(raw_pool, list) and raw_pool
+            else ["revelation", "parallele_inverse", "countdown"]
+        )
+
         return cls(
             model=str(script_cfg.get("model", "gemini-2.0-flash")),
             temperature=float(script_cfg.get("temperature", 0.8)),
@@ -73,6 +89,7 @@ class ScriptGenConfig:
             max_duration_sec=int(pipeline_cfg.get("max_duration_sec", 60)),
             max_scenes=int(pipeline_cfg.get("max_scenes", 8)),
             prompts_dir=prompts_dir,
+            template_pool=template_pool,
         )
 
 
@@ -91,6 +108,7 @@ class ScriptGenerator:
         api_key = self.env.get("GEMINI_API_KEY", "")
         if not api_key:
             raise ScriptGenerationError("Missing GEMINI_API_KEY in environment.")
+        self._request_timeout = float(self.env.get("GEMINI_REQUEST_TIMEOUT_SEC", "60"))
 
         genai.configure(api_key=api_key)
         self.model = genai.GenerativeModel(
@@ -122,6 +140,8 @@ class ScriptGenerator:
         """
         if not topic or not topic.strip():
             raise ScriptGenerationError("Topic must be a non-empty string.")
+        if len(topic) > 500:
+            raise ScriptValidationError("Topic exceeds 500 characters.")
 
         system_prompt = self._read_prompt_file("system_script.txt")
         user_prompt = self._build_user_prompt(topic=topic, trend_context=trend_context or {})
@@ -129,7 +149,7 @@ class ScriptGenerator:
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(3),
             wait=wait_exponential(multiplier=1, min=1, max=8),
-            retry=retry_if_exception_type(ScriptGenerationError),
+            retry=retry_if_not_exception_type(ScriptValidationError),
             reraise=True,
         ):
             with attempt:
@@ -157,7 +177,15 @@ class ScriptGenerator:
                 raise ScriptGenerationError("Gemini returned an empty response body.")
             return text.strip()
 
-        return await asyncio.to_thread(_invoke)
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(_invoke),
+                timeout=self._request_timeout,
+            )
+        except asyncio.TimeoutError as exc:
+            raise ScriptGenerationError(
+                f"Gemini request timed out after {self._request_timeout}s"
+            ) from exc
 
     def _read_prompt_file(self, filename: str) -> str:
         path = self.cfg.prompts_dir / filename
@@ -170,10 +198,13 @@ class ScriptGenerator:
 
     def _build_user_prompt(self, topic: str, trend_context: dict[str, Any]) -> str:
         trend_json = json.dumps(trend_context, ensure_ascii=False)
+        template = random.choice(self.cfg.template_pool)
+        LOGGER.debug("Narrative template selected: %s", template)
         return (
             "Generate one YouTube Short package in French. "
             f"Topic: {topic}\n"
             f"Trend context JSON: {trend_json}\n"
+            f"Narrative template: {template}\n"
             "Hard constraints:\n"
             f"- Total duration between {self.cfg.min_duration_sec} and {self.cfg.max_duration_sec} seconds\n"
             f"- Number of scenes <= {self.cfg.max_scenes}\n"
@@ -194,10 +225,10 @@ class ScriptGenerator:
         try:
             payload = json.loads(candidate)
         except json.JSONDecodeError as exc:
-            raise ScriptGenerationError(f"Invalid JSON from Gemini: {exc}") from exc
+            raise ScriptValidationError(f"Invalid JSON from Gemini: {exc}") from exc
 
         if not isinstance(payload, dict):
-            raise ScriptGenerationError("Gemini payload must be a JSON object.")
+            raise ScriptValidationError("Gemini payload must be a JSON object.")
         return payload
 
     def _validate_payload(self, payload: dict[str, Any]) -> None:
@@ -213,28 +244,28 @@ class ScriptGenerator:
         }
         missing = sorted(required_top - set(payload.keys()))
         if missing:
-            raise ScriptGenerationError(
+            raise ScriptValidationError(
                 f"Generated payload missing required fields: {', '.join(missing)}"
             )
 
         duration = payload.get("duration_sec")
         if not isinstance(duration, int):
-            raise ScriptGenerationError("'duration_sec' must be an integer.")
+            raise ScriptValidationError("'duration_sec' must be an integer.")
         if duration < self.cfg.min_duration_sec or duration > self.cfg.max_duration_sec:
-            raise ScriptGenerationError(
+            raise ScriptValidationError(
                 f"duration_sec must be between {self.cfg.min_duration_sec} and "
                 f"{self.cfg.max_duration_sec}. Got: {duration}"
             )
 
         language = payload.get("language")
         if language != "fr":
-            raise ScriptGenerationError("'language' must be exactly 'fr'.")
+            raise ScriptValidationError("'language' must be exactly 'fr'.")
 
         scenes = payload.get("scenes")
         if not isinstance(scenes, list) or not scenes:
-            raise ScriptGenerationError("'scenes' must be a non-empty list.")
+            raise ScriptValidationError("'scenes' must be a non-empty list.")
         if len(scenes) > self.cfg.max_scenes:
-            raise ScriptGenerationError(
+            raise ScriptValidationError(
                 f"Number of scenes exceeds max_scenes={self.cfg.max_scenes}."
             )
 
@@ -244,29 +275,34 @@ class ScriptGenerator:
             accumulated_duration += int(scene["duration_sec"])
 
         if abs(accumulated_duration - duration) > 2:
-            raise ScriptGenerationError(
+            raise ScriptValidationError(
                 "Sum of scene durations must approximately match duration_sec "
                 f"(difference <= 2s). total={accumulated_duration}, duration={duration}"
             )
 
         metadata = payload.get("metadata")
         if not isinstance(metadata, dict):
-            raise ScriptGenerationError("'metadata' must be a JSON object.")
+            raise ScriptValidationError("'metadata' must be a JSON object.")
 
         required_metadata = {"youtube_title", "youtube_description", "youtube_tags"}
         missing_meta = sorted(required_metadata - set(metadata.keys()))
         if missing_meta:
-            raise ScriptGenerationError(
+            raise ScriptValidationError(
                 f"metadata missing required fields: {', '.join(missing_meta)}"
             )
 
         tags = metadata.get("youtube_tags")
         if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
-            raise ScriptGenerationError("metadata.youtube_tags must be a list of strings.")
+            raise ScriptValidationError("metadata.youtube_tags must be a list of strings.")
+
+        if not (5 <= len(tags) <= 12):
+            raise ScriptValidationError(
+                f"metadata.youtube_tags must contain 5 to 12 tags. Got: {len(tags)}"
+            )
 
     def _validate_scene(self, scene: Any, index: int) -> None:
         if not isinstance(scene, dict):
-            raise ScriptGenerationError(f"Scene #{index} must be an object.")
+            raise ScriptValidationError(f"Scene #{index} must be an object.")
 
         required = {
             "scene_id",
@@ -280,13 +316,13 @@ class ScriptGenerator:
         }
         missing = sorted(required - set(scene.keys()))
         if missing:
-            raise ScriptGenerationError(
+            raise ScriptValidationError(
                 f"Scene #{index} missing fields: {', '.join(missing)}"
             )
 
         duration = scene.get("duration_sec")
         if not isinstance(duration, int) or duration <= 0:
-            raise ScriptGenerationError(f"Scene #{index} has invalid duration_sec.")
+            raise ScriptValidationError(f"Scene #{index} has invalid duration_sec.")
 
         for field in (
             "narration",
@@ -298,7 +334,7 @@ class ScriptGenerator:
         ):
             value = scene.get(field)
             if not isinstance(value, str) or not value.strip():
-                raise ScriptGenerationError(f"Scene #{index} field '{field}' must be non-empty.")
+                raise ScriptValidationError(f"Scene #{index} field '{field}' must be non-empty.")
 
 
 async def generate_script_package(

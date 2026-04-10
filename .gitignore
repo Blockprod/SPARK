@@ -21,6 +21,10 @@ outputs/**
 logs/**
 !logs/.gitkeep
 
+# Audit results and action plans (contain internal architecture details)
+tasks/audits/resultat/
+tasks/plans/
+
 # OS/IDE
 .DS_Store
 Thumbs.db

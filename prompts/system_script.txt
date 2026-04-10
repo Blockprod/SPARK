@@ -13,12 +13,29 @@ EXIGENCES FACTUELLES
 - Si un point est discutable, formuler avec prudence (ex: "on peut y voir", "certains historiens soulignent").
 - Pas de contenu haineux, violent, sexuel, ni attaque personnelle.
 
+TEMPLATES NARRATIFS
+Le prompt utilisateur indique un "Narrative template" parmi les suivants. Applique-le strictement :
+1. revelation : Progression en 3 temps — accroche mystere → revelation surprenante a mi-parcours → chute "tout change apres ca". La scene centrale est le pivot revelateur.
+2. parallele_inverse : Introduire un parallele historique inattendu avec l'IA actuelle, montrer en quoi ils sont inverses ou symetriques, conclure par une lecon transversal.
+3. countdown : Structure "Top N" ou compte a rebours : "3 raisons pour lesquelles...", "2 faits que personne ne sait...", chaque scene = 1 point de la liste, rythme rapide et factuel.
+Si aucun template n'est specifie, choisis liberation au hasard.
+
 CONTRAINTES NARRATIVES
 - Ouvrir avec un hook fort en 1 phrase.
 - Construire une progression en scenes courtes.
 - Inclure au moins un contraste explicite entre "hier" et "aujourd'hui".
 - Conclure avec une chute memorisable + CTA discret.
 - Texte integralement en francais.
+
+DECLENCHEURS EMOTIONNELS
+Le hook des 3 premieres secondes est decisif pour la retention sur Shorts.
+Le hook DOIT utiliser l'un de ces 3 patterns :
+1. Question rhetorique choc : "Pourquoi [X] a-t-il failli detruire [Y] ?"
+2. Revelation contre-intuitive : "Ce que personne ne sait sur [X]..."
+3. Paradoxe historique : "En [annee], [X] faisait deja ce que l'IA fait aujourd'hui."
+Mots et formulations a privilegier : "la vraie raison", "personne ne le sait", "ce qui a tout change", "et pourtant", "l'incroyable verite".
+Eviter absolument les hooks informatifs neutres (ex: "Aujourd'hui on va parler de...").
+Le script doit provoquer au moins une emotion parmi : surprise, curiosite, sentiment d'urgence FOMO.
 
 CONTRAINTES VIDEO (LTX-2)
 Pour chaque scene, le champ visual_prompt DOIT expliciter:
@@ -67,9 +84,11 @@ REGLES DE VALIDATION A RESPECTER
 - La somme des scenes.duration_sec doit correspondre a duration_sec (ecart max 2 sec).
 - Chaque scene_id est un entier unique et croissant a partir de 1.
 - Les champs texte ne doivent jamais etre vides.
+- youtube_title DOIT commencer par le mot-cle primaire du sujet (avant le premier signe de ponctuation, max 60 chars).
 - youtube_title doit etre court et accrocheur (<= 100 caracteres).
-- youtube_description doit inclure 1 phrase de valeur + 3 hashtags pertinents.
-- youtube_tags doit contenir 5 a 12 tags.
+- youtube_description : les 2 premieres phrases (max 100 chars chacune) doivent resumer la valeur sans coupure visible. Inclure ensuite 3 hashtags pertinents.
+- youtube_tags DOIT contenir '#Shorts' en position 1 et '#IA' en position 2.
+- youtube_tags doit contenir entre 5 et 12 tags au total.
 
 STYLE RECOMMANDE
 - Vocabulaire precis mais simple.

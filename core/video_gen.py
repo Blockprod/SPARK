@@ -147,6 +147,8 @@ class VideoGenerator:
         clip_paths: list[Path] = []
         conditioning_image: Image.Image | None = None
 
+        degraded_scenes: list[int] = []
+
         for scene in scenes:
             scene_id = int(scene.get("scene_id", len(clip_paths) + 1))
             use_conditioning = (
@@ -162,25 +164,49 @@ class VideoGenerator:
 
             output_path = self.cfg.clips_dir / f"{run_id}_scene{scene_id:02d}.mp4"
 
-            if use_conditioning:
-                clip_path = await self._render_i2v(
-                    scene=scene,
-                    conditioning_image=conditioning_image,
-                    output_path=output_path,
-                    scene_id=scene_id,
+            try:
+                if use_conditioning:
+                    clip_path = await self._render_i2v(
+                        scene=scene,
+                        conditioning_image=conditioning_image,
+                        output_path=output_path,
+                        scene_id=scene_id,
+                    )
+                else:
+                    clip_path = await self._render_t2v(
+                        scene=scene,
+                        output_path=output_path,
+                        scene_id=scene_id,
+                    )
+            except VideoGenerationError as exc:
+                LOGGER.warning(
+                    "Scene %d generation failed (%s) — using static fallback clip.",
+                    scene_id,
+                    exc,
                 )
-            else:
-                clip_path = await self._render_t2v(
-                    scene=scene,
-                    output_path=output_path,
-                    scene_id=scene_id,
+                clip_path = await asyncio.to_thread(
+                    _generate_static_fallback,
+                    conditioning_image,
+                    output_path,
+                    int(scene.get("duration_sec", 8)),
+                    self.cfg.fps,
+                    self.cfg.width,
+                    self.cfg.height,
                 )
+                degraded_scenes.append(scene_id)
 
             clip_paths.append(clip_path)
             conditioning_image = await asyncio.to_thread(
                 _extract_last_frame, clip_path
             )
 
+        if degraded_scenes:
+            LOGGER.warning(
+                "Run '%s' degraded: %d scene(s) used static fallback: %s",
+                run_id,
+                len(degraded_scenes),
+                degraded_scenes,
+            )
         LOGGER.info("All %d clips generated for run '%s'.", len(clip_paths), run_id)
         return clip_paths
 
@@ -419,6 +445,64 @@ def _sanitize_run_id(run_id: str) -> str:
         Alphanumeric-and-underscores-only run identifier.
     """
     return re.sub(r"[^\w\-]", "_", run_id)[:64]
+
+
+def _generate_static_fallback(
+    reference_image: "Image.Image | None",
+    output_path: Path,
+    duration_sec: int,
+    fps: int,
+    width: int,
+    height: int,
+) -> Path:
+    """Generate a static fallback MP4 clip from a reference frame (or black).
+
+    Used when LTX-Video generation fails for a scene. Produces a clip of the
+    correct duration filled with the last available conditioning frame, or a
+    solid black frame if none is available.
+
+    Args:
+        reference_image: PIL Image to use as static frame, or None for black.
+        output_path: Target MP4 path to write.
+        duration_sec: Desired clip duration in seconds.
+        fps: Frames per second.
+        width: Frame width in pixels.
+        height: Frame height in pixels.
+
+    Returns:
+        Path to the written fallback MP4.
+
+    Raises:
+        VideoGenerationError: If writing fails.
+    """
+    import numpy as np
+
+    num_frames = max(1, duration_sec * fps)
+
+    if reference_image is not None:
+        try:
+            frame = reference_image.resize((width, height)).convert("RGB")
+            frame_array = np.array(frame, dtype=np.uint8)
+        except Exception:
+            frame_array = np.zeros((height, width, 3), dtype=np.uint8)
+    else:
+        frame_array = np.zeros((height, width, 3), dtype=np.uint8)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(output_path), fourcc, float(fps), (width, height))
+    if not writer.isOpened():
+        raise VideoGenerationError(
+            f"Could not open VideoWriter for fallback clip: {output_path}"
+        )
+    try:
+        frame_bgr = cv2.cvtColor(frame_array, cv2.COLOR_RGB2BGR)
+        for _ in range(num_frames):
+            writer.write(frame_bgr)
+    finally:
+        writer.release()
+
+    return output_path
 
 
 async def generate_video_clips(

@@ -33,6 +33,13 @@ REGLES ABSOLUES
 - Maintenir la coherence colorimetrie entre les scenes d'un meme Short.
 - Toutes les descriptions en ANGLAIS (langue optimale pour LTX-2.3).
 
+CONTRAINTES COPYRIGHT
+- Ne JAMAIS decrire un tableau, une photographie ou une oeuvre artistique reconnaissable et protegee (ex : tableau de Vermeer, photo de presse identifiable, affiche de film sous copyright).
+- Ne JAMAIS inclure de logos, marques, symboles commerciaux ou gouvernementaux identifies.
+- Ne JAMAIS reproduire l'apparence precise d'une personnalite publique vivante ou d'un personnage fictif protege.
+- Preferer des reconstitutions generiques d'epoque : "scriptorium medieval generique", "salle des machines industrielles XIXe", "bureau gouvernemental annees 1950" plutot que toute reference precise et identifiable.
+- En cas de doute sur une reference visuelle, la remplacer par une description d'ambiance generique equivalente.
+
 ---
 
 FEW-SHOT EXAMPLES

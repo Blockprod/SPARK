@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -343,8 +345,18 @@ class PostProducer:
 
             # Video — optionally burn subtitles
             v = video_stream.video
+            tmp_srt: Path | None = None
             if srt_path is not None and srt_path.exists():
-                srt_escaped = str(srt_path).replace("\\", "/").replace(":", "\\:")
+                # Copy SRT to a temp file with an ASCII, space-free path to avoid
+                # FFmpeg subtitles filter failures on Windows paths with spaces or unicode.
+                with tempfile.NamedTemporaryFile(
+                    suffix=".srt",
+                    delete=False,
+                    dir=tempfile.gettempdir(),
+                ) as tmp:
+                    tmp_srt = Path(tmp.name)
+                shutil.copy2(srt_path, tmp_srt)
+                srt_escaped = tmp_srt.as_posix().replace(":", "\\:")
                 v = v.filter(
                     "subtitles",
                     filename=srt_escaped,
@@ -406,6 +418,9 @@ class PostProducer:
                 raise PostProductionError(
                     f"FFmpeg final export failed: {stderr}"
                 ) from exc
+            finally:
+                if tmp_srt is not None:
+                    tmp_srt.unlink(missing_ok=True)
 
             LOGGER.info("Final video exported → %s", final_path)
             return final_path
