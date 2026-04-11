@@ -90,10 +90,11 @@ script_generation:
   include_cta: true
 
 video_generation:
-  provider: ltx-2.3
-  model_id: Lightricks/LTX-Video-2.3
+  provider: ltx-video
+  model_id: Lightricks/LTX-Video
   device: cuda
   dtype: float16
+  cpu_offload: true  # requis pour 8 Go VRAM — décharge les couches non actives sur CPU
 
   generation:
     num_inference_steps: 30
