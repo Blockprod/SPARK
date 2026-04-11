@@ -1,9 +1,6 @@
 """Audio voice-over generation for shorts-engine.
 
-Active backend is determined by config (active_backend: kokoro | voxtral).
 Kokoro runs fully locally via ONNX inference.
-The Voxtral backend slot is stubbed and ready for activation once API access
-is available — swapping requires only env vars, no pipeline changes.
 """
 
 from __future__ import annotations
@@ -38,7 +35,6 @@ class AudioGenerationError(RuntimeError):
 class AudioGenConfig:
     """Configuration for the audio generation stage."""
 
-    active_backend: str           # "kokoro" or "voxtral"
     language: str
 
     # Kokoro
@@ -48,11 +44,6 @@ class AudioGenConfig:
     kokoro_speed: float
     kokoro_sample_rate: int
     kokoro_output_format: str
-
-    # Voxtral (future)
-    voxtral_enabled: bool
-    voxtral_model: str
-    voxtral_voice: str
 
     # Outputs
     audio_dir: Path
@@ -79,17 +70,9 @@ class AudioGenConfig:
             raise AudioGenerationError("Missing 'paths' in configuration.")
 
         kokoro_cfg = audio_cfg.get("kokoro", {})
-        voxtral_cfg = audio_cfg.get("voxtral", {})
         audio_dir = Path(str(paths_cfg.get("audio_dir", "./outputs/audio"))).resolve()
 
-        backend = str(audio_cfg.get("active_backend", "kokoro")).lower()
-        if backend not in {"kokoro", "voxtral"}:
-            raise AudioGenerationError(
-                f"Unsupported audio backend '{backend}'. Must be 'kokoro' or 'voxtral'."
-            )
-
         return cls(
-            active_backend=backend,
             language=str(audio_cfg.get("language", "fr-fr")),
             kokoro_model_path=str(kokoro_cfg.get("model_path", "./models/kokoro-v1.0.fp16.onnx")),
             kokoro_voices_path=str(kokoro_cfg.get("voices_path", "./models/voices-v1.0.bin")),
@@ -97,9 +80,6 @@ class AudioGenConfig:
             kokoro_speed=float(kokoro_cfg.get("speed", 1.0)),
             kokoro_sample_rate=int(kokoro_cfg.get("sample_rate", 24000)),
             kokoro_output_format=str(kokoro_cfg.get("output_format", "wav")),
-            voxtral_enabled=bool(voxtral_cfg.get("enabled", False)),
-            voxtral_model=str(voxtral_cfg.get("model", "")),
-            voxtral_voice=str(voxtral_cfg.get("voice", "fr_female")),
             audio_dir=audio_dir,
         )
 
@@ -211,142 +191,6 @@ class KokoroBackend(TTSBackend):
 
 
 # ---------------------------------------------------------------------------
-# Voxtral backend stub (Mistral API — future swap)
-# ---------------------------------------------------------------------------
-
-
-class VoxtralBackend(TTSBackend):
-    """Voxtral TTS backend placeholder.
-
-    Activate by setting active_backend=voxtral in config.yaml and
-    providing VOXTRAL_API_KEY + VOXTRAL_MODEL in the environment.
-    The pipeline contract (synthesize signature) is identical to Kokoro.
-    """
-
-    def __init__(self, cfg: AudioGenConfig, env: dict[str, str]) -> None:
-        """Initialize Voxtral backend.
-
-        Args:
-            cfg: Audio generation configuration.
-            env: Environment mapping containing VOXTRAL_API_KEY.
-        """
-        self.cfg = cfg
-        self.env = env
-        api_key = env.get("MISTRAL_API_KEY", "")
-        model = env.get("VOXTRAL_MODEL", "") or cfg.voxtral_model
-        if not api_key:
-            raise AudioGenerationError(
-                "MISTRAL_API_KEY is required when active_backend=voxtral."
-            )
-        if not model:
-            raise AudioGenerationError(
-                "VOXTRAL_MODEL must be set when active_backend=voxtral."
-            )
-        self._api_key = api_key
-        self._model = model
-
-    async def synthesize(self, text: str, output_path: Path) -> Path:
-        """Synthesize via Voxtral TTS API (Mistral).
-
-        Calls POST https://api.mistral.ai/v1/audio/speech with the configured
-        model and voice, writes PCM audio to a WAV file at *output_path*.
-
-        Args:
-            text: Plain French narration text.
-            output_path: Target WAV file path.
-
-        Returns:
-            Path to the written WAV file.
-
-        Raises:
-            AudioGenerationError: On empty text, API error, or I/O failure.
-        """
-        if not text or not text.strip():
-            raise AudioGenerationError("Cannot synthesize empty narration text.")
-
-        def _run() -> Path:
-            import urllib.request
-            import urllib.error
-
-            payload = {
-                "model": self._model,
-                "input": text.strip(),
-                "voice": self.cfg.voxtral_voice,
-                "response_format": "pcm",
-                "sample_rate": self.cfg.kokoro_sample_rate,
-            }
-            import json as _json
-            body = _json.dumps(payload).encode("utf-8")
-            req = urllib.request.Request(
-                "https://api.mistral.ai/v1/audio/speech",
-                data=body,
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                    "Accept": "audio/pcm",
-                },
-                method="POST",
-            )
-            pcm_bytes: bytes = b""
-            try:
-                for _attempt in Retrying(
-                    stop=stop_after_attempt(4),
-                    wait=wait_exponential(multiplier=2, min=5, max=60),
-                    sleep=time.sleep,  # explicit ref — patchable in tests via patch("time.sleep")
-                    reraise=True,
-                ):
-                    with _attempt:
-                        try:
-                            with urllib.request.urlopen(req, timeout=120) as resp:
-                                pcm_bytes = resp.read()
-                        except urllib.error.HTTPError as exc:
-                            if exc.code in (429, 503):
-                                LOGGER.warning(
-                                    "Voxtral API returned %d — retrying…", exc.code
-                                )
-                                raise  # trigger tenacity retry
-                            raise AudioGenerationError(
-                                f"Voxtral API HTTP error {exc.code}: {exc.reason}"
-                            ) from exc
-                        except urllib.error.URLError as exc:
-                            raise AudioGenerationError(
-                                f"Voxtral API connection error: {exc.reason}"
-                            ) from exc
-            except urllib.error.HTTPError as exc:
-                raise AudioGenerationError(
-                    f"Voxtral API returned {exc.code} after 4 retries: {exc.reason}"
-                ) from exc
-
-            if not pcm_bytes:
-                raise AudioGenerationError("Voxtral API returned empty audio bytes.")
-
-            # Write PCM bytes as a standard WAV file.
-            sample_rate = self.cfg.kokoro_sample_rate
-            n_channels = 1
-            sampwidth = 2  # 16-bit PCM
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                with wave.open(str(output_path), "wb") as wf:
-                    wf.setnchannels(n_channels)
-                    wf.setsampwidth(sampwidth)
-                    wf.setframerate(sample_rate)
-                    wf.writeframes(pcm_bytes)
-            except Exception as exc:
-                raise AudioGenerationError(
-                    f"Failed to write Voxtral WAV to {output_path}: {exc}"
-                ) from exc
-
-            LOGGER.debug(
-                "Voxtral wrote %s (%.2fs)",
-                output_path,
-                len(pcm_bytes) / (sample_rate * n_channels * sampwidth),
-            )
-            return output_path
-
-        return await asyncio.to_thread(_run)
-
-
-# ---------------------------------------------------------------------------
 # AudioGenerator orchestrator
 # ---------------------------------------------------------------------------
 
@@ -354,32 +198,10 @@ class VoxtralBackend(TTSBackend):
 class AudioGenerator:
     """Orchestrates TTS synthesis for all scenes in a script package."""
 
-    def __init__(
-        self, cfg: AudioGenConfig, env: dict[str, str] | None = None
-    ) -> None:
-        """Initialize audio generator with backend selection.
-
-        Args:
-            cfg: Audio generation configuration.
-            env: Environment mapping (used only by Voxtral backend currently).
-        """
+    def __init__(self, cfg: AudioGenConfig) -> None:
         self.cfg = cfg
-        env = env or {}
-
-        if cfg.active_backend == "voxtral":
-            _mistral_key = env.get("MISTRAL_API_KEY", "")
-            if _mistral_key:
-                LOGGER.info("Audio backend: Voxtral (Mistral API)")
-                self._backend: TTSBackend = VoxtralBackend(cfg=cfg, env=env)
-            else:
-                LOGGER.warning(
-                    "active_backend=voxtral but MISTRAL_API_KEY is absent "
-                    "— falling back to Kokoro (degraded audio quality)."
-                )
-                self._backend = KokoroBackend(cfg=cfg)
-        else:
-            LOGGER.info("Audio backend: Kokoro local ONNX (voice=%s)", cfg.kokoro_voice)
-            self._backend = KokoroBackend(cfg=cfg)
+        LOGGER.info("Audio backend: Kokoro local ONNX (voice=%s)", cfg.kokoro_voice)
+        self._backend: TTSBackend = KokoroBackend(cfg=cfg)
 
     async def generate_scene_audio(
         self, scenes: list[dict[str, Any]], run_id: str
@@ -502,7 +324,7 @@ async def generate_audio(
         config: Full global config mapping loaded from config.yaml.
         scenes: Validated scene list from the script package output.
         run_id: Unique identifier for this pipeline run.
-        env: Environment mapping (required for Voxtral backend).
+        env: Environment mapping (unused, kept for API compatibility).
 
     Returns:
         Dictionary with keys:

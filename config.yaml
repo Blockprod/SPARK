@@ -124,12 +124,6 @@ audio_generation:
     sample_rate: 24000
     output_format: wav
 
-  # Prepared for future online swap without changing pipeline contract
-  # Backend selection is controlled by active_backend above, not by an enabled flag
-  voxtral:
-    model: "mistral-tts-latest"
-    voice: "fr_female"
-
 post_production:
   ffmpeg:
     video_codec: libx264
