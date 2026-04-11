@@ -89,6 +89,7 @@ REGLES DE VALIDATION A RESPECTER
 - youtube_description : les 2 premieres phrases (max 100 chars chacune) doivent resumer la valeur sans coupure visible. Inclure ensuite 3 hashtags pertinents.
 - youtube_tags DOIT contenir '#Shorts' en position 1 et '#IA' en position 2.
 - youtube_tags doit contenir entre 5 et 12 tags au total.
+- youtube_description DOIT se terminer exactement par la phrase : "Contenu generé avec l'aide de l'IA." (déclaration obligatoire YouTube 2024 — contenu synthétique IA).
 
 STYLE RECOMMANDE
 - Vocabulaire precis mais simple.

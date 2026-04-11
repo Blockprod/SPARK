@@ -97,3 +97,37 @@ class TestGetDashboardApiKey:
         with patch.dict(os.environ, {"DASHBOARD_API_KEY": "super-secret"}):
             result = _get_dashboard_api_key()
         assert result == "super-secret"
+
+
+# ---------------------------------------------------------------------------
+# GET /analytics/summary — authentification requise
+# ---------------------------------------------------------------------------
+
+
+class TestAnalyticsSummaryAuth:
+    """Vérifie que GET /analytics/summary exige une API key valide."""
+
+    def _client(self):
+        from fastapi.testclient import TestClient
+        from dashboard.app import app
+        return TestClient(app, raise_server_exceptions=False)
+
+    def test_no_api_key_returns_401_or_422(self) -> None:
+        """Missing header → FastAPI 422 (required field); wrong value → 401."""
+        with patch.dict(os.environ, {"DASHBOARD_API_KEY": "test-key"}):
+            client = self._client()
+            resp = client.get("/analytics/summary")
+        assert resp.status_code in (401, 422)
+
+    def test_wrong_api_key_returns_401(self) -> None:
+        with patch.dict(os.environ, {"DASHBOARD_API_KEY": "test-key"}):
+            client = self._client()
+            resp = client.get("/analytics/summary", headers={"X-API-Key": "wrong-key"})
+        assert resp.status_code == 401
+
+    def test_valid_api_key_passes_auth(self) -> None:
+        """With a valid key, auth passes (response may be 200 or 500 on config, not 401)."""
+        with patch.dict(os.environ, {"DASHBOARD_API_KEY": "test-key"}):
+            client = self._client()
+            resp = client.get("/analytics/summary", headers={"X-API-Key": "test-key"})
+        assert resp.status_code != 401

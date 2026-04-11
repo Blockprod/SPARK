@@ -399,6 +399,7 @@ def _build_video_metadata(
     status_body: dict[str, Any] = {
         "privacyStatus": actual_privacy,
         "selfDeclaredMadeForKids": False,
+        "containsSyntheticMedia": True,  # YouTube AI content disclosure — required since 2024 policy
     }
 
     if publish_at is not None:

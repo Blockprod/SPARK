@@ -89,7 +89,7 @@ class VideoGenConfig:
             dtype=dtype,
             num_inference_steps=int(gen_cfg.get("num_inference_steps", 30)),
             guidance_scale=float(gen_cfg.get("guidance_scale", 6.5)),
-            seed=int(gen_cfg.get("seed", 42)),
+            seed=int(gen_cfg.get("seed", -1)),
             fps=int(pipeline_cfg.get("target_fps", 24)),
             width=int(pipeline_cfg.get("target_width", 1080)),
             height=int(pipeline_cfg.get("target_height", 1920)),
@@ -124,7 +124,7 @@ class VideoGenerator:
         self._i2v: LTXImageToVideoPipeline | None = None
 
     async def generate_clips(
-        self, scenes: list[dict[str, Any]], run_id: str
+        self, scenes: list[dict[str, Any]], run_id: str, progress_callback: Any | None = None
     ) -> list[Path]:
         """Generate one MP4 clip per scene and return ordered list of paths.
 
@@ -144,10 +144,32 @@ class VideoGenerator:
 
         self.cfg.clips_dir.mkdir(parents=True, exist_ok=True)
 
+        # Compute effective seed: -1 means derive deterministically from run_id
+        # so each run produces distinct visuals even for the same topic.
+        if self.cfg.seed == -1:
+            effective_seed = int(run_id[:8], 16) % (2 ** 32)
+            LOGGER.debug("Seed derived from run_id '%s': %d", run_id, effective_seed)
+        else:
+            effective_seed = self.cfg.seed
+
         clip_paths: list[Path] = []
         conditioning_image: Image.Image | None = None
 
         degraded_scenes: list[int] = []
+
+        # Capture the running event loop here (in the async context) so we can
+        # post progress events from inside asyncio.to_thread workers.
+        _loop = asyncio.get_event_loop()
+
+        async def _emit_scene_done(scene_id: int, clip_path: Path, total: int) -> None:
+            if progress_callback is not None:
+                try:
+                    await progress_callback(
+                        "video_scene_done",
+                        {"scene_id": scene_id, "total": total, "clip_path": str(clip_path)},
+                    )
+                except Exception as cb_exc:
+                    LOGGER.debug("video progress callback error (non-fatal): %s", cb_exc)
 
         for scene in scenes:
             scene_id = int(scene.get("scene_id", len(clip_paths) + 1))
@@ -171,12 +193,14 @@ class VideoGenerator:
                         conditioning_image=conditioning_image,
                         output_path=output_path,
                         scene_id=scene_id,
+                        seed=effective_seed,
                     )
                 else:
                     clip_path = await self._render_t2v(
                         scene=scene,
                         output_path=output_path,
                         scene_id=scene_id,
+                        seed=effective_seed,
                     )
             except VideoGenerationError as exc:
                 LOGGER.warning(
@@ -196,6 +220,7 @@ class VideoGenerator:
                 degraded_scenes.append(scene_id)
 
             clip_paths.append(clip_path)
+            await _emit_scene_done(scene_id, clip_path, len(scenes))
             conditioning_image = await asyncio.to_thread(
                 _extract_last_frame, clip_path
             )
@@ -208,13 +233,14 @@ class VideoGenerator:
                 degraded_scenes,
             )
         LOGGER.info("All %d clips generated for run '%s'.", len(clip_paths), run_id)
-        return clip_paths
+        return clip_paths, degraded_scenes
 
     async def _render_t2v(
         self,
         scene: dict[str, Any],
         output_path: Path,
         scene_id: int,
+        seed: int,
     ) -> Path:
         def _run() -> Path:
             pipeline = self._get_t2v_pipeline()
@@ -225,7 +251,7 @@ class VideoGenerator:
                 max_duration_sec=self.cfg.max_scene_duration_sec,
             )
             generator = torch.Generator(device=self.cfg.device).manual_seed(
-                self.cfg.seed + scene_id
+                seed + scene_id
             )
             try:
                 output = pipeline(
@@ -256,6 +282,7 @@ class VideoGenerator:
         conditioning_image: Image.Image,
         output_path: Path,
         scene_id: int,
+        seed: int,
     ) -> Path:
         def _run() -> Path:
             pipeline = self._get_i2v_pipeline()
@@ -266,7 +293,7 @@ class VideoGenerator:
                 max_duration_sec=self.cfg.max_scene_duration_sec,
             )
             generator = torch.Generator(device=self.cfg.device).manual_seed(
-                self.cfg.seed + scene_id
+                seed + scene_id
             )
             resized_image = conditioning_image.resize(
                 (self.cfg.width, self.cfg.height), Image.LANCZOS
@@ -509,16 +536,21 @@ async def generate_video_clips(
     config: dict[str, Any],
     scenes: list[dict[str, Any]],
     run_id: str,
-) -> list[Path]:
+    progress_callback: Any | None = None,
+) -> tuple[list[Path], list[int]]:
     """Public async entry point for video clip generation.
 
     Args:
         config: Full global config mapping loaded from config.yaml.
         scenes: Validated scene list from the script package output.
         run_id: Unique identifier for this pipeline run (used in filenames).
+        progress_callback: Optional async callable(stage, data) for SSE progress
+                           reporting. Called after each scene clip is rendered.
 
     Returns:
-        Ordered list of absolute Paths to generated MP4 clip files.
+        Tuple of (clip_paths, degraded_scene_ids) where clip_paths is the ordered
+        list of generated MP4 paths and degraded_scene_ids lists any scene IDs
+        that fell back to a static frame due to GPU errors.
 
     Raises:
         VideoGenerationError: On configuration error or generation failure.
@@ -526,5 +558,7 @@ async def generate_video_clips(
     safe_id = _sanitize_run_id(run_id)
     cfg = VideoGenConfig.from_mapping(config)
     generator = VideoGenerator(cfg=cfg)
-    clips = await generator.generate_clips(scenes=scenes, run_id=safe_id)
-    return clips
+    clip_paths, degraded_scene_ids = await generator.generate_clips(
+        scenes=scenes, run_id=safe_id, progress_callback=progress_callback
+    )
+    return clip_paths, degraded_scene_ids

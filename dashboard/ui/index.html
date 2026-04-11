@@ -229,6 +229,84 @@
     .log-error .log-stage { color: var(--error); }
     .log-done .log-stage  { color: var(--success); }
 
+    /* ---- Analytics panel ---- */
+    .analytics-panel {
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+    }
+    .analytics-header {
+      padding: .6rem 1.5rem;
+      font-size: .78rem;
+      text-transform: uppercase;
+      letter-spacing: .07em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: .75rem;
+    }
+    .analytics-header .refresh-btn {
+      margin-left: auto;
+      background: none;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: .85rem;
+      padding: .1rem .3rem;
+      border-radius: 4px;
+      transition: color .15s;
+    }
+    .analytics-header .refresh-btn:hover { color: var(--accent); }
+    .analytics-body {
+      padding: .75rem 1.5rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: .75rem;
+    }
+    .analytics-card {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: .6rem .9rem;
+      min-width: 140px;
+      flex: 1;
+    }
+    .analytics-card-label {
+      font-size: .7rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      margin-bottom: .35rem;
+    }
+    .analytics-card-value {
+      font-size: 1.25rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+    .analytics-card-sub {
+      font-size: .7rem;
+      color: var(--muted);
+      margin-top: .2rem;
+    }
+    .analytics-bar-wrap {
+      margin-top: .3rem;
+      height: 4px;
+      background: var(--border);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .analytics-bar {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 2px;
+      transition: width .4s ease;
+    }
+    .analytics-empty {
+      font-size: .8rem;
+      color: var(--muted);
+      padding: .5rem 0;
+    }
+
     /* ---- Pulse indicator ---- */
     .pulse {
       width: 8px; height: 8px;
@@ -366,6 +444,18 @@
       </table>
     </div>
 
+    <!-- Analytics performance panel -->
+    <div class="analytics-panel">
+      <div class="analytics-header">
+        <span>Performance par template</span>
+        <span id="analytics-runs-count" style="color:var(--accent);font-size:.78rem"></span>
+        <button class="refresh-btn" onclick="loadAnalytics()" title="Actualiser">↻</button>
+      </div>
+      <div class="analytics-body" id="analytics-body">
+        <div class="analytics-empty">Chargement des données…</div>
+      </div>
+    </div>
+
     <!-- SSE log panel -->
     <div class="log-panel">
       <div class="log-panel-header">
@@ -394,8 +484,57 @@
   window.addEventListener('DOMContentLoaded', () => {
     loadTrends();
     loadRuns();
+    loadAnalytics();
     setInterval(loadRuns, 15000);
+    setInterval(loadAnalytics, 5 * 60000); // refresh every 5 minutes
   });
+
+  // ---- Analytics ----
+  async function loadAnalytics() {
+    try {
+      const res = await fetch('/analytics/summary');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      renderAnalytics(data);
+    } catch (e) {
+      const body = document.getElementById('analytics-body');
+      body.innerHTML = `<div class="analytics-empty">Erreur: ${escHtml(e.message)}</div>`;
+    }
+  }
+
+  function renderAnalytics(data) {
+    const body = document.getElementById('analytics-body');
+    const counter = document.getElementById('analytics-runs-count');
+    counter.textContent = data.total_runs ? `${data.total_runs} runs` : '';
+
+    const by_tmpl = data.by_template || {};
+    const entries = Object.entries(by_tmpl);
+
+    if (entries.length === 0) {
+      body.innerHTML = '<div class="analytics-empty">Aucune donnée encore disponible — les métriques apparaissent 48 h après le premier upload.</div>';
+      return;
+    }
+
+    // max avg_view_pct for bar scaling
+    const maxPct = Math.max(...entries.map(([, v]) => v.avg_view_pct || 0), 1);
+
+    body.innerHTML = entries
+      .sort(([, a], [, b]) => (b.avg_view_pct || 0) - (a.avg_view_pct || 0))
+      .map(([tmpl, kpi]) => {
+        const pct = (kpi.avg_view_pct || 0).toFixed(1);
+        const barWidth = Math.round(((kpi.avg_view_pct || 0) / maxPct) * 100);
+        const views = (kpi.total_views || 0).toLocaleString('fr-FR');
+        return `
+          <div class="analytics-card">
+            <div class="analytics-card-label">${escHtml(tmpl)}</div>
+            <div class="analytics-card-value">${pct}%</div>
+            <div class="analytics-bar-wrap"><div class="analytics-bar" style="width:${barWidth}%"></div></div>
+            <div class="analytics-card-sub">${escHtml(String(kpi.runs || 0))} runs · ${views} vues</div>
+          </div>
+        `;
+      })
+      .join('');
+  }
 
   // ---- Trend loading ----
   async function loadTrends(force = false) {

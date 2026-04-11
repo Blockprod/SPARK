@@ -49,6 +49,22 @@ BASE_DIR = Path(__file__).resolve().parent
 UI_DIR = BASE_DIR / "ui"
 ROOT_DIR = BASE_DIR.parent
 
+async def _analytics_refresh_loop() -> None:
+    """Background task: process due analytics pending entries every 6 hours."""
+    from pipeline import _process_pending_analytics  # local import to avoid circular
+
+    interval = 6 * 3600  # seconds
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            config = _load_config()
+            env = dict(os.environ)
+            await _process_pending_analytics(config, env)
+            LOGGER.info("analytics_refresh_loop: pending analytics processed")
+        except Exception as exc:
+            LOGGER.warning("analytics_refresh_loop: error — %s", exc)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:  # noqa: ARG001
     global _pipeline_semaphore
@@ -59,7 +75,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:  # noqa: ARG001
     except Exception:
         max_concurrent = 1
     _pipeline_semaphore = asyncio.Semaphore(max_concurrent)
+    refresh_task = asyncio.create_task(_analytics_refresh_loop())
     yield
+    refresh_task.cancel()
+    try:
+        await refresh_task
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(
@@ -146,6 +168,12 @@ class GenerateRequest(BaseModel):
         default=None,
         description="ISO-8601 UTC datetime for scheduled YouTube publication.",
     )
+    profile: str | None = Field(
+        default=None,
+        max_length=64,
+        pattern=r"^[a-z0-9_\-]+$",
+        description="Niche profile name (e.g. 'ia_histoire'). Merges profiles/{profile}.yaml over global config.",
+    )
 
 
 class TrendResponse(BaseModel):
@@ -211,6 +239,7 @@ async def _run_pipeline_task(
     topic: str | None,
     upload: bool,
     publish_at: datetime | None,
+    profile: str | None = None,
 ) -> None:
     from pipeline import run_pipeline
 
@@ -228,6 +257,7 @@ async def _run_pipeline_task(
                 publish_at=publish_at,
                 run_id=run_id,
                 progress_callback=progress_cb,
+                profile=profile,
             )
             _run_results[run_id] = result
             await queue.put({"stage": "done", "data": result, "ts": datetime.now(timezone.utc).isoformat()})
@@ -331,6 +361,7 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
         topic=req.topic,
         upload=req.upload,
         publish_at=publish_at,
+        profile=req.profile,
     )
 
     LOGGER.info("Pipeline run %s started for topic '%s'.", run_id, req.topic or "auto")
@@ -470,6 +501,24 @@ async def upload_run(run_id: str = APIPath(..., pattern=r"^[0-9a-f]{12}$")):
         except Exception as hist_exc:
             LOGGER.warning("Could not append to publish_history.jsonl: %s", hist_exc)
 
+        # Schedule deferred analytics fetch (48h after upload) — same as run_pipeline()
+        if video_id:
+            try:
+                from pipeline import _write_pending_analytics
+                _write_pending_analytics(
+                    config,
+                    run_id=run_id,
+                    video_id=video_id,
+                    template_used=str(manifest_data.get("template_used", "")),
+                    topic=str(manifest_data.get("topic", "")),
+                    profile=str(manifest_data.get("profile", "default") or "default"),
+                    backend_used=str(
+                        config.get("audio_generation", {}).get("active_backend", "kokoro")
+                    ),
+                )
+            except Exception as analytics_exc:
+                LOGGER.warning("Could not schedule pending analytics: %s", analytics_exc)
+
         return UploadResponse(
             run_id=run_id,
             youtube_video_id=video_id,
@@ -477,6 +526,103 @@ async def upload_run(run_id: str = APIPath(..., pattern=r"^[0-9a-f]{12}$")):
         )
     except Exception as exc:
         LOGGER.error("Upload for run %s failed: %s", run_id, exc)
+        raise HTTPException(status_code=502, detail=f"Upload failed: {exc}")
+
+
+@app.post("/retry-upload/{run_id}", response_model=UploadResponse, dependencies=[Depends(_verify_api_key)])
+async def retry_upload(run_id: str = APIPath(..., pattern=r"^[0-9a-f]{12}$")):
+    """Retry YouTube upload for a run whose upload previously failed.
+
+    Reads the run manifest from disk, verifies the final video file exists,
+    and triggers the upload without re-rendering. Accepts runs in any status
+    as long as a final_video path is recorded in the manifest.
+    """
+    config = _load_config()
+    logs_dir = Path(
+        str(config.get("paths", {}).get("logs_dir", "./logs"))
+    ).resolve()
+    manifest_path = logs_dir / f"run_{run_id}_manifest.json"
+
+    if not manifest_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"No manifest found for run '{run_id}'. Run may not exist or never reached post-production.",
+        )
+
+    try:
+        manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Could not read manifest: {exc}")
+
+    final_video = manifest_data.get("final_video")
+    if not final_video or not Path(final_video).exists():
+        raise HTTPException(
+            status_code=409,
+            detail=f"Final video not found on disk for run '{run_id}'. Re-render required.",
+        )
+
+    if manifest_data.get("youtube_video_id"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Run '{run_id}' was already uploaded (video_id={manifest_data['youtube_video_id']}).",
+        )
+
+    try:
+        from core.uploader import upload_to_youtube
+
+        env = _load_env()
+        script_payload = manifest_data.get("script_payload", manifest_data)
+        response = await upload_to_youtube(
+            config=config,
+            env=env,
+            video_path=Path(final_video),
+            script_payload=script_payload,
+        )
+        video_id = response.get("id", "")
+
+        # Update in-memory state if run is still tracked
+        if run_id in _run_results:
+            _run_results[run_id]["youtube_video_id"] = video_id
+            _run_results[run_id]["youtube_url"] = f"https://youtu.be/{video_id}"
+            _run_results[run_id]["status"] = "success"
+
+        # Persist updated manifest
+        manifest_data["youtube_video_id"] = video_id
+        manifest_data["youtube_url"] = f"https://youtu.be/{video_id}"
+        manifest_data["status"] = "success"
+        try:
+            manifest_path.write_text(
+                json.dumps(manifest_data, indent=2, ensure_ascii=False, default=str),
+                encoding="utf-8",
+            )
+        except Exception as write_exc:
+            LOGGER.warning("Could not update manifest after retry-upload: %s", write_exc)
+
+        # Append to publish_history.jsonl
+        try:
+            from core.history import append_publish_history
+            entry = {
+                "run_id": run_id,
+                "topic": str(manifest_data.get("topic", "")),
+                "video_id": video_id,
+                "published_at": datetime.now(timezone.utc).isoformat(),
+                "status": "success",
+                "status_checked": False,
+            }
+            append_publish_history(logs_dir, entry)
+        except Exception as hist_exc:
+            LOGGER.warning("Could not append to publish_history.jsonl: %s", hist_exc)
+
+        LOGGER.info("Retry upload for run %s succeeded: https://youtu.be/%s", run_id, video_id)
+        return UploadResponse(
+            run_id=run_id,
+            youtube_video_id=video_id,
+            youtube_url=f"https://youtu.be/{video_id}",
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        LOGGER.error("Retry upload for run %s failed: %s", run_id, exc)
         raise HTTPException(status_code=502, detail=f"Upload failed: {exc}")
 
 
@@ -607,3 +753,80 @@ async def list_runs():
             )
 
     return summaries
+
+
+@app.get("/analytics/summary", dependencies=[Depends(_verify_api_key)])
+async def analytics_summary(profile: str | None = None):
+    """Return aggregated analytics KPIs from performance_cache.jsonl.
+
+    Optional query param:
+      ?profile=ia_histoire  — filter entries to a specific niche profile.
+      Omit or pass ?profile=  to aggregate all profiles.
+
+    Response shape:
+      {
+        "by_template": {"revelation": {"avg_view_pct": 42.3, "runs": 5}, ...},
+        "total_runs": 12,
+        "last_fetched_at": "2026-...",
+        "profile_filter": "ia_histoire" | null
+      }
+    """
+    try:
+        config = _load_config()
+        logs_dir = Path(str(config.get("paths", {}).get("logs_dir", "./logs"))).resolve()
+        cache_path = logs_dir / "performance_cache.jsonl"
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Config error: {exc}")
+
+    if not cache_path.exists():
+        return {"by_template": {}, "total_runs": 0, "last_fetched_at": None}
+
+    entries: list[dict] = []
+    try:
+        with cache_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Could not read performance cache: {exc}")
+
+    # Filter by profile when requested
+    if profile:
+        entries = [e for e in entries if (e.get("profile") or "default") == profile]
+
+    template_data: dict[str, dict[str, Any]] = {}
+    last_fetched: str | None = None
+
+    for entry in entries:
+        tmpl = entry.get("template_used") or "unknown"
+        avg_vp = float(entry.get("avg_view_percentage", 0.0))
+        fetched_at = entry.get("fetched_at", "")
+        if fetched_at and (last_fetched is None or fetched_at > last_fetched):
+            last_fetched = fetched_at
+
+        if tmpl not in template_data:
+            template_data[tmpl] = {"sum_avg_view_pct": 0.0, "runs": 0, "total_views": 0}
+        template_data[tmpl]["sum_avg_view_pct"] += avg_vp
+        template_data[tmpl]["runs"] += 1
+        template_data[tmpl]["total_views"] += int(entry.get("views", 0))
+
+    by_template = {
+        tmpl: {
+            "avg_view_pct": round(stats["sum_avg_view_pct"] / stats["runs"], 2),
+            "runs": stats["runs"],
+            "total_views": stats["total_views"],
+        }
+        for tmpl, stats in template_data.items()
+    }
+
+    return {
+        "by_template": by_template,
+        "total_runs": len(entries),
+        "last_fetched_at": last_fetched,
+        "profile_filter": profile,
+    }

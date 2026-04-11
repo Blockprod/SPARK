@@ -125,12 +125,15 @@ class ScriptGenerator:
         self,
         topic: str,
         trend_context: dict[str, Any] | None = None,
+        performance_data: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Generate a validated narrative package for a topic.
 
         Args:
             topic: User-approved topic string.
             trend_context: Optional trend metrics used to enrich prompting.
+            performance_data: Optional historical performance entries from
+                ``performance_cache.jsonl`` used to pick the best template.
 
         Returns:
             Strictly validated JSON payload ready for video and audio generation.
@@ -144,7 +147,9 @@ class ScriptGenerator:
             raise ScriptValidationError("Topic exceeds 500 characters.")
 
         system_prompt = self._read_prompt_file("system_script.txt")
-        user_prompt = self._build_user_prompt(topic=topic, trend_context=trend_context or {})
+        user_prompt = self._build_user_prompt(
+            topic=topic, trend_context=trend_context or {}, performance_data=performance_data
+        )
 
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(3),
@@ -156,6 +161,7 @@ class ScriptGenerator:
                 raw = await self._generate_raw(system_prompt=system_prompt, user_prompt=user_prompt)
                 payload = self._parse_json_response(raw)
                 self._validate_payload(payload)
+                payload["template_used"] = getattr(self, "_last_template", "unknown")
                 return payload
 
         raise ScriptGenerationError("Unexpected script generation retry exhaustion.")
@@ -196,9 +202,50 @@ class ScriptGenerator:
             raise ScriptGenerationError(f"Prompt file is empty: {path}")
         return content
 
-    def _build_user_prompt(self, topic: str, trend_context: dict[str, Any]) -> str:
+    def _select_template(self, performance_data: list[dict[str, Any]] | None = None) -> str:
+        """Select the narrative template for the prompt.
+
+        Prefers the template with the best average ``avg_view_percentage`` over
+        the last 14 entries of ``performance_data``.  Falls back to a random
+        choice when no usable performance data is available.
+
+        Args:
+            performance_data: Previously loaded performance_cache.jsonl entries.
+
+        Returns:
+            Template name string.
+        """
+        if not performance_data:
+            return random.choice(self.cfg.template_pool)
+
+        template_scores: dict[str, list[float]] = {}
+        for entry in performance_data[-14:]:
+            tmpl = entry.get("template_used", "")
+            perf = entry.get("avg_view_percentage", 0.0)
+            if tmpl and tmpl in self.cfg.template_pool:
+                try:
+                    template_scores.setdefault(tmpl, []).append(float(perf))
+                except (TypeError, ValueError):
+                    continue
+
+        if not template_scores:
+            return random.choice(self.cfg.template_pool)
+
+        best = max(
+            template_scores,
+            key=lambda t: sum(template_scores[t]) / len(template_scores[t]),
+        )
+        LOGGER.debug(
+            "Template selected by performance history: %s (%.1f%% avg view)",
+            best,
+            sum(template_scores[best]) / len(template_scores[best]),
+        )
+        return best
+
+    def _build_user_prompt(self, topic: str, trend_context: dict[str, Any], performance_data: list[dict[str, Any]] | None = None) -> str:
         trend_json = json.dumps(trend_context, ensure_ascii=False)
-        template = random.choice(self.cfg.template_pool)
+        template = self._select_template(performance_data)
+        self._last_template = template
         LOGGER.debug("Narrative template selected: %s", template)
         return (
             "Generate one YouTube Short package in French. "
@@ -342,6 +389,7 @@ async def generate_script_package(
     env: dict[str, str],
     topic: str,
     trend_context: dict[str, Any] | None = None,
+    performance_data: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Public async API for script generation.
 
@@ -350,13 +398,18 @@ async def generate_script_package(
         env: Environment mapping with Gemini credentials.
         topic: Approved topic to generate.
         trend_context: Optional signal metadata for richer prompting.
+        performance_data: Optional list of historical performance entries
+            (from ``performance_cache.jsonl``) used to pick the best template.
 
     Returns:
         A validated JSON payload suitable for video/audio pipeline stages.
     """
     cfg = ScriptGenConfig.from_mapping(config)
     generator = ScriptGenerator(cfg=cfg, env=env)
-    payload = await generator.generate_for_topic(topic=topic, trend_context=trend_context)
+    payload = await generator.generate_for_topic(
+        topic=topic, trend_context=trend_context, performance_data=performance_data
+    )
+    payload["ai_generated"] = True  # internal traceability — all content is fully AI-generated
     LOGGER.info(
         "Generated script package for topic '%s' with %d scenes.",
         payload.get("topic", topic),

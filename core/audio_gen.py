@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import struct
+import time
 import wave
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ from typing import Any
 
 import numpy as np
 import soundfile as sf
+from tenacity import Retrying, stop_after_attempt, wait_exponential
 
 LOGGER = logging.getLogger(__name__)
 
@@ -40,6 +42,8 @@ class AudioGenConfig:
     language: str
 
     # Kokoro
+    kokoro_model_path: str
+    kokoro_voices_path: str
     kokoro_voice: str
     kokoro_speed: float
     kokoro_sample_rate: int
@@ -86,8 +90,10 @@ class AudioGenConfig:
 
         return cls(
             active_backend=backend,
-            language=str(audio_cfg.get("language", "fr")),
-            kokoro_voice=str(kokoro_cfg.get("voice", "fr_female_default")),
+            language=str(audio_cfg.get("language", "fr-fr")),
+            kokoro_model_path=str(kokoro_cfg.get("model_path", "./models/kokoro-v1.0.fp16.onnx")),
+            kokoro_voices_path=str(kokoro_cfg.get("voices_path", "./models/voices-v1.0.bin")),
+            kokoro_voice=str(kokoro_cfg.get("voice", "ff_siwis")),
             kokoro_speed=float(kokoro_cfg.get("speed", 1.0)),
             kokoro_sample_rate=int(kokoro_cfg.get("sample_rate", 24000)),
             kokoro_output_format=str(kokoro_cfg.get("output_format", "wav")),
@@ -149,7 +155,7 @@ class KokoroBackend(TTSBackend):
                 ) from exc
             LOGGER.info("Loading Kokoro ONNX model (voice=%s)…", self.cfg.kokoro_voice)
             try:
-                self._kokoro = Kokoro(voice=self.cfg.kokoro_voice)
+                self._kokoro = Kokoro(self.cfg.kokoro_model_path, self.cfg.kokoro_voices_path)
             except Exception as exc:
                 raise AudioGenerationError(
                     f"Failed to load Kokoro model: {exc}"
@@ -226,11 +232,11 @@ class VoxtralBackend(TTSBackend):
         """
         self.cfg = cfg
         self.env = env
-        api_key = env.get("VOXTRAL_API_KEY", "")
+        api_key = env.get("MISTRAL_API_KEY", "")
         model = env.get("VOXTRAL_MODEL", "") or cfg.voxtral_model
         if not api_key:
             raise AudioGenerationError(
-                "VOXTRAL_API_KEY is required when active_backend=voxtral."
+                "MISTRAL_API_KEY is required when active_backend=voxtral."
             )
         if not model:
             raise AudioGenerationError(
@@ -281,16 +287,34 @@ class VoxtralBackend(TTSBackend):
                 },
                 method="POST",
             )
+            pcm_bytes: bytes = b""
             try:
-                with urllib.request.urlopen(req, timeout=120) as resp:
-                    pcm_bytes: bytes = resp.read()
+                for _attempt in Retrying(
+                    stop=stop_after_attempt(4),
+                    wait=wait_exponential(multiplier=2, min=5, max=60),
+                    sleep=time.sleep,  # explicit ref — patchable in tests via patch("time.sleep")
+                    reraise=True,
+                ):
+                    with _attempt:
+                        try:
+                            with urllib.request.urlopen(req, timeout=120) as resp:
+                                pcm_bytes = resp.read()
+                        except urllib.error.HTTPError as exc:
+                            if exc.code in (429, 503):
+                                LOGGER.warning(
+                                    "Voxtral API returned %d — retrying…", exc.code
+                                )
+                                raise  # trigger tenacity retry
+                            raise AudioGenerationError(
+                                f"Voxtral API HTTP error {exc.code}: {exc.reason}"
+                            ) from exc
+                        except urllib.error.URLError as exc:
+                            raise AudioGenerationError(
+                                f"Voxtral API connection error: {exc.reason}"
+                            ) from exc
             except urllib.error.HTTPError as exc:
                 raise AudioGenerationError(
-                    f"Voxtral API HTTP error {exc.code}: {exc.reason}"
-                ) from exc
-            except urllib.error.URLError as exc:
-                raise AudioGenerationError(
-                    f"Voxtral API connection error: {exc.reason}"
+                    f"Voxtral API returned {exc.code} after 4 retries: {exc.reason}"
                 ) from exc
 
             if not pcm_bytes:
@@ -343,8 +367,16 @@ class AudioGenerator:
         env = env or {}
 
         if cfg.active_backend == "voxtral":
-            LOGGER.info("Audio backend: Voxtral (Mistral API)")
-            self._backend: TTSBackend = VoxtralBackend(cfg=cfg, env=env)
+            _mistral_key = env.get("MISTRAL_API_KEY", "")
+            if _mistral_key:
+                LOGGER.info("Audio backend: Voxtral (Mistral API)")
+                self._backend: TTSBackend = VoxtralBackend(cfg=cfg, env=env)
+            else:
+                LOGGER.warning(
+                    "active_backend=voxtral but MISTRAL_API_KEY is absent "
+                    "— falling back to Kokoro (degraded audio quality)."
+                )
+                self._backend = KokoroBackend(cfg=cfg)
         else:
             LOGGER.info("Audio backend: Kokoro local ONNX (voice=%s)", cfg.kokoro_voice)
             self._backend = KokoroBackend(cfg=cfg)

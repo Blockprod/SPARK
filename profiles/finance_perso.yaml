@@ -1,0 +1,33 @@
+# Profil de niche : Finance personnelle pour les 18-35 ans
+# Ce fichier surcharge config.yaml pour les paramètres spécifiques à cette niche.
+# Seules les clés présentes ici remplacent les valeurs globales.
+
+project:
+  niche: finance_perso
+  language: fr
+
+trends:
+  google:
+    geo: FR
+    hl: fr-FR
+  reddit:
+    subreddits:
+      - personalfinance
+      - france
+      - investissement
+      - cryptomonnaie
+
+script_generation:
+  narration_style: "pratique, direct, motivant, adapté aux débutants"
+  template_pool:
+    - revelation
+    - countdown
+    - avertissement
+
+uploader:
+  default_tags:
+    - Finance
+    - Budget
+    - Investissement
+    - Argent
+    - Shorts

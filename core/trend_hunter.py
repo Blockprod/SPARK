@@ -19,6 +19,7 @@ from typing import Any
 from pytrends.request import TrendReq
 import praw
 from prawcore.exceptions import PrawcoreException
+from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential
 
 LOGGER = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ class TopicSignal:
     reddit_mentions: float = 0.0
     reddit_engagement: float = 0.0
     source_notes: list[str] | None = None
+    signal_quality: str = "full"  # "full" | "reddit_only" | "google_only"
 
     def __post_init__(self) -> None:
         if self.source_notes is None:
@@ -169,7 +171,11 @@ class TrendHunter:
         reddit_failed = isinstance(reddit_result, Exception)
 
         if google_failed:
-            LOGGER.error("Google Trends fetch failed: %s", google_result)
+            LOGGER.warning(
+                "Google Trends fetch failed after retries: %s — "
+                "topic scoring: Google signals unavailable, Reddit only.",
+                google_result,
+            )
         else:
             google_signals = google_result
 
@@ -248,11 +254,41 @@ class TrendHunter:
     async def fetch_google_trends(self) -> dict[str, TopicSignal]:
         """Fetch candidate topics and metrics from Google Trends.
 
+        Uses SerpAPI (official) if SERPAPI_KEY is present in env.
+        Falls back to pytrends (unofficial scraping) with a deprecation warning
+        if SERPAPI_KEY is absent. Retries up to 4 times with exponential backoff
+        on transient failures.
+
         Returns:
             A mapping from normalized topic key to topic signal.
         """
+        if self.env.get("SERPAPI_KEY"):
+            LOGGER.debug("Google Trends: using SerpAPI (official)")
+            async for attempt in AsyncRetrying(
+                stop=stop_after_attempt(4),
+                wait=wait_exponential(multiplier=2, min=5, max=60),
+                reraise=True,
+            ):
+                with attempt:
+                    return await asyncio.to_thread(self._fetch_google_trends_serpapi)
+            raise TrendHunterError("Google Trends (SerpAPI) failed after all retries")
 
-        return await asyncio.to_thread(self._fetch_google_trends_sync)
+        LOGGER.warning(
+            "SERPAPI_KEY absent — falling back to pytrends (unofficial scraping). "
+            "Set SERPAPI_KEY in .env to use the official SerpAPI endpoint."
+        )
+        async for attempt in AsyncRetrying(
+            stop=stop_after_attempt(4),
+            wait=wait_exponential(multiplier=2, min=5, max=60),
+            reraise=True,
+        ):
+            with attempt:
+                LOGGER.debug(
+                    "Google Trends (pytrends) fetch attempt %d/4…",
+                    attempt.retry_state.attempt_number,
+                )
+                return await asyncio.to_thread(self._fetch_google_trends_sync)
+        raise TrendHunterError("Google Trends (pytrends) failed after all retries")
 
     async def fetch_reddit_topics(self) -> dict[str, TopicSignal]:
         """Fetch topic candidates from configured Reddit communities.
@@ -265,6 +301,74 @@ class TrendHunter:
         """
 
         return await asyncio.to_thread(self._fetch_reddit_topics_sync)
+
+    def _fetch_google_trends_serpapi(self) -> dict[str, TopicSignal]:
+        """Fetch Google Trends data via SerpAPI (official, stable endpoint).
+
+        Uses SERPAPI_KEY from env. Calls the Google Trends Trending Now endpoint.
+        Returns the same TopicSignal structure as the pytrends backend for
+        transparent swap without upstream changes.
+
+        Raises:
+            TrendHunterError: On HTTP error, empty response, or missing API key.
+        """
+        import json as _json
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        api_key = self.env.get("SERPAPI_KEY", "")
+        if not api_key:
+            raise TrendHunterError("SERPAPI_KEY is required for SerpAPI backend.")
+
+        params = urllib.parse.urlencode({
+            "engine": "google_trends_trending_now",
+            "geo": self.cfg.google_geo,
+            "hl": self.cfg.google_hl,
+            "api_key": api_key,
+        })
+        url = f"https://serpapi.com/search?{params}"
+
+        try:
+            with urllib.request.urlopen(url, timeout=30) as resp:
+                data = _json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code in (429, 503):
+                raise  # retried by tenacity
+            raise TrendHunterError(
+                f"SerpAPI HTTP error {exc.code}: {exc.reason}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise TrendHunterError(f"SerpAPI connection error: {exc.reason}") from exc
+
+        trending_searches = data.get("trending_searches", [])
+        if not trending_searches:
+            LOGGER.warning("SerpAPI returned no trending searches for geo=%s.", self.cfg.google_geo)
+            return {}
+
+        signals: dict[str, TopicSignal] = {}
+        seen: set[str] = set()
+
+        for item in trending_searches[: self.cfg.google_max_topics]:
+            topic = str(item.get("query") or item.get("title") or "").strip()
+            if not topic:
+                continue
+            key = self._canonical_topic(topic)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+
+            # SerpAPI provides search_volume and normalized_trend_value when available.
+            volume = float(item.get("search_volume") or item.get("value") or 50.0)
+            momentum = float(item.get("increase_percentage") or 0.0)
+
+            if key not in signals:
+                signals[key] = TopicSignal(topic=topic)
+            signals[key].google_volume = max(signals[key].google_volume, min(volume, 100.0))
+            signals[key].google_momentum = max(signals[key].google_momentum, min(momentum, 100.0))
+            signals[key].source_notes.append("serpapi_trends")
+
+        return signals
 
     def _fetch_google_trends_sync(self) -> dict[str, TopicSignal]:
         pytrends = TrendReq(hl=self.cfg.google_hl, tz=self.cfg.google_tz)
@@ -526,9 +630,14 @@ class TrendHunter:
         if not cache_path.exists():
             return {}
 
+        # performance_cache.jsonl has {topic, avg_view_percentage} per run.
+        # analytics_cache.jsonl has per-video metrics but no topic field — skip it.
+        perf_cache = logs_dir / "performance_cache.jsonl"
+        source_path = perf_cache if perf_cache.exists() else cache_path
+
         keyword_stats: dict[str, list[float]] = {}
         try:
-            with cache_path.open("r", encoding="utf-8") as fh:
+            with source_path.open("r", encoding="utf-8") as fh:
                 for line in fh:
                     line = line.strip()
                     if not line:
@@ -551,7 +660,7 @@ class TrendHunter:
                         if len(kw) >= 4:
                             keyword_stats.setdefault(kw, []).append(score_val)
         except Exception as exc:
-            LOGGER.warning("Could not read analytics_cache.jsonl for perf bonus: %s", exc)
+            LOGGER.warning("Could not read performance cache for perf bonus: %s", exc)
             return {}
 
         # Aggregate: average avg_view_percentage per keyword, map to [0, 0.15] bonus

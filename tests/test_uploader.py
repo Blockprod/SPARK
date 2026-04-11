@@ -307,3 +307,15 @@ class TestBuildVideoMetadataPrivacy:
         )
         assert result["snippet"]["defaultLanguage"] == "fr"
         assert result["snippet"]["defaultAudioLanguage"] == "fr"
+
+    def test_contains_synthetic_media_true(self) -> None:
+        """YouTube 2024 policy: AI-generated content must declare containsSyntheticMedia."""
+        result = _build_video_metadata(
+            _script_payload(),
+            default_tags=[],
+            category_id=28,
+            privacy_status="private",
+            notify_subscribers=False,
+            publish_at=None,
+        )
+        assert result["status"]["containsSyntheticMedia"] is True

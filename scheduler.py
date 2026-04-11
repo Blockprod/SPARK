@@ -47,6 +47,7 @@ async def _scheduled_pipeline_job(
     env: dict[str, str],
     slot_label: str,
     publish_at_str: str | None = None,
+    profile: str | None = None,
 ) -> None:
     """Execute a full pipeline run triggered by the scheduler.
 
@@ -55,6 +56,7 @@ async def _scheduled_pipeline_job(
         env: Environment mapping with credentials.
         slot_label: Human-readable label for this time slot (for logs).
         publish_at_str: Optional ISO-8601 publish time string, or None for no scheduling.
+        profile: Optional niche profile name (e.g. ``"ia_histoire"``).
     """
     publish_at: datetime | None = None
     if publish_at_str:
@@ -93,6 +95,7 @@ async def _scheduled_pipeline_job(
             topic=None,
             upload=auto_upload,
             publish_at=publish_at,
+            profile=profile,
         )
         LOGGER.info(
             "Scheduled run completed (status=%s, run_id=%s).",
@@ -218,12 +221,51 @@ def build_scheduler(
                 "env": env,
                 "slot_label": slot_label,
                 "publish_at_str": None,
+                "profile": None,
             },
             id=f"pipeline_slot_{hour:02d}{minute:02d}",
             name=f"Pipeline run @ {slot_label} ({timezone_str})",
             replace_existing=True,
         )
         LOGGER.info("Job registered: pipeline run @ %s %s", slot_label, timezone_str)
+
+    # Per-profile scheduled jobs (overrides or supplements default slots).
+    profiles_cfg = sched_cfg.get("profiles", {})
+    if isinstance(profiles_cfg, dict):
+        for profile_name, profile_sched in profiles_cfg.items():
+            if not isinstance(profile_sched, dict):
+                continue
+            if not profile_sched.get("enabled", False):
+                LOGGER.info("Profile '%s' scheduler is disabled — skipping.", profile_name)
+                continue
+            profile_slots = profile_sched.get("publish_slots", [])
+            if not isinstance(profile_slots, list) or not profile_slots:
+                LOGGER.warning("Profile '%s' publish_slots is empty or missing — skipped.", profile_name)
+                continue
+            for slot in profile_slots:
+                try:
+                    h_str, m_str = str(slot).split(":")
+                    h, m = int(h_str), int(m_str)
+                except (ValueError, AttributeError) as exc:
+                    raise SchedulerError(
+                        f"Invalid publish slot '{slot}' for profile '{profile_name}'."
+                    ) from exc
+                lbl = f"{h:02d}:{m:02d}"
+                scheduler.add_job(
+                    _scheduled_pipeline_job,
+                    trigger=CronTrigger(hour=h, minute=m, timezone=timezone_str),
+                    kwargs={
+                        "config": config,
+                        "env": env,
+                        "slot_label": f"{profile_name}@{lbl}",
+                        "publish_at_str": None,
+                        "profile": profile_name,
+                    },
+                    id=f"pipeline_profile_{profile_name}_{h:02d}{m:02d}",
+                    name=f"Pipeline run [{profile_name}] @ {lbl} ({timezone_str})",
+                    replace_existing=True,
+                )
+                LOGGER.info("Job registered: [%s] @ %s %s", profile_name, lbl, timezone_str)
 
     return scheduler
 

@@ -37,6 +37,9 @@ pipeline:
   # Concurrency guard: maximum simultaneous pipeline runs (avoids GPU OOM)
   max_concurrent_runs: 1
 
+  # Global hard timeout per run — protects the semaphore from deadlock on GPU hang
+  global_timeout_sec: 7200  # 2 hours; increase if LTX renders take longer
+
   # Flow controls — reserved for future parallelism and cleanup flags
   keep_intermediate_files: false  # set true to preserve clips/audio after each run
 
@@ -95,7 +98,7 @@ video_generation:
   generation:
     num_inference_steps: 30
     guidance_scale: 6.5
-    seed: 42
+    seed: -1  # -1 = seed déterministe par run_id (variété visuelle garantie)
     negative_prompt: "blurry, low resolution, watermark, text artifacts, flicker, frame jitter"
 
   scenes:
@@ -110,10 +113,13 @@ video_generation:
 
 audio_generation:
   active_backend: kokoro
-  language: fr
+  language: fr-fr  # espeak-ng lang code — required by Kokoro for French
 
   kokoro:
-    voice: fr_female_default
+    # Model files must be downloaded separately — see README for commands
+    model_path: ./models/kokoro-v1.0.fp16.onnx
+    voices_path: ./models/voices-v1.0.bin
+    voice: ff_siwis  # only FR voice available in Kokoro-82M (hexgrad/Kokoro-82M)
     speed: 1.0
     sample_rate: 24000
     output_format: wav
@@ -162,6 +168,14 @@ uploader:
     - Tech
     - Shorts
 
+platforms:
+  youtube:
+    enabled: true   # Primary distribution channel
+  tiktok:
+    enabled: false  # Set to true + TIKTOK_ACCESS_TOKEN in .env to enable
+  instagram:
+    enabled: false  # Set to true + INSTAGRAM_* vars in .env to enable
+
 scheduler:
   enabled: true
   timezone: Europe/Paris
@@ -175,6 +189,19 @@ scheduler:
     - "12:30"
     - "18:30"
     - "21:00"
+
+  # Per-profile scheduling (optional — each niche can have its own slots)
+  # Set enabled: true and define publish_slots to activate per-profile jobs.
+  profiles:
+    ia_histoire:
+      enabled: false
+      publish_slots:
+        - "12:30"
+        - "21:00"
+    finance_perso:
+      enabled: false
+      publish_slots:
+        - "18:30"
 
 dashboard:
   host: 127.0.0.1
