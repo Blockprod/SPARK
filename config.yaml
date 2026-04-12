@@ -121,7 +121,7 @@ audio_generation:
     model_path: ./models/kokoro-v1.0.fp16.onnx
     voices_path: ./models/voices-v1.0.bin
     voice: ff_siwis  # only FR voice available in Kokoro-82M (hexgrad/Kokoro-82M)
-    speed: 1.0
+    speed: 1.1
     sample_rate: 24000
     output_format: wav
 
@@ -142,14 +142,14 @@ post_production:
     line_padding_ms: 120
     style:
       font_name: Arial
-      font_size: 54
+      font_size: 55
       primary_color: "&H00FFFFFF"
       outline_color: "&H00000000"
-      back_color: "&H64000000"
-      outline: 2
-      shadow: 0
+      back_color: "&H80000000"
+      outline: 3
+      shadow: 1
       alignment: 2
-      margin_v: 120
+      margin_v: 60
 
 uploader:
   provider: youtube_data_api_v3

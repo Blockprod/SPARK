@@ -64,6 +64,10 @@ class PostProdConfig:
     alignment: int
     margin_v: int
 
+    # Video resolution (for ASS PlayRes scaling)
+    video_width: int
+    video_height: int
+
     # Output paths
     renders_dir: Path
     temp_dir: Path
@@ -83,6 +87,7 @@ class PostProdConfig:
         """
         pp_cfg = config.get("post_production")
         paths_cfg = config.get("paths")
+        pipeline_cfg = config.get("pipeline", {})
 
         if not isinstance(pp_cfg, dict):
             raise PostProductionError("Missing 'post_production' in configuration.")
@@ -118,7 +123,9 @@ class PostProdConfig:
             outline=int(style_cfg.get("outline", 2)),
             shadow=int(style_cfg.get("shadow", 0)),
             alignment=int(style_cfg.get("alignment", 2)),
-            margin_v=int(style_cfg.get("margin_v", 120)),
+            margin_v=int(style_cfg.get("margin_v", 60)),
+            video_width=int(pipeline_cfg.get("target_width", 768)),
+            video_height=int(pipeline_cfg.get("target_height", 1344)),
             renders_dir=renders_dir,
             temp_dir=temp_dir,
         )
@@ -259,11 +266,13 @@ class PostProducer:
         Raises:
             PostProductionError: If scene data is malformed.
         """
-        srt_path = self.cfg.temp_dir / f"{run_id}_subtitles.srt"
+        srt_path = self.cfg.temp_dir / f"{run_id}_subtitles.ass"
 
         def _build() -> Path:
             subs = pysubs2.SSAFile()
             subs.info["WrapStyle"] = "0"
+            subs.info["PlayResX"] = str(self.cfg.video_width)
+            subs.info["PlayResY"] = str(self.cfg.video_height)
 
             current_ms = 0
             for scene in scenes:
@@ -305,8 +314,8 @@ class PostProducer:
 
             _apply_ass_style(subs, self.cfg)
             srt_path.parent.mkdir(parents=True, exist_ok=True)
-            subs.save(str(srt_path), format_="srt")
-            LOGGER.debug("SRT written → %s", srt_path)
+            subs.save(str(srt_path), format_="ass")
+            LOGGER.debug("ASS subtitles written → %s", srt_path)
             return srt_path
 
         return await asyncio.to_thread(_build)
@@ -349,23 +358,12 @@ class PostProducer:
             if srt_path is not None and srt_path.exists():
                 # Write SRT to cwd so ffmpeg receives a relative path — avoids
                 # Windows drive-letter colon escaping issues in filter_complex.
-                tmp_srt = Path.cwd() / f"_sub_{id(srt_path)}.srt"
+                tmp_srt = Path.cwd() / f"_sub_{id(srt_path)}.ass"
                 shutil.copy2(srt_path, tmp_srt)
                 srt_escaped = tmp_srt.name  # relative filename, no drive letter
                 v = v.filter(
                     "subtitles",
                     filename=srt_escaped,
-                    force_style=(
-                        f"FontName={self.cfg.font_name},"
-                        f"FontSize={self.cfg.font_size},"
-                        f"PrimaryColour={self.cfg.primary_color},"
-                        f"OutlineColour={self.cfg.outline_color},"
-                        f"BackColour={self.cfg.back_color},"
-                        f"Outline={self.cfg.outline},"
-                        f"Shadow={self.cfg.shadow},"
-                        f"Alignment={self.cfg.alignment},"
-                        f"MarginV={self.cfg.margin_v}"
-                    ),
                 )
 
             # Audio mixing: ambient @ -18 dBFS + narration @ -3 dBFS
