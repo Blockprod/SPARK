@@ -12,8 +12,8 @@ orjson==3.10.15
 httpx==0.28.1
 tenacity==9.0.0
 
-# LLM script generation (Gemini Flash 2.0)
-google-generativeai==0.8.5
+# LLM script generation (Gemini)
+google-genai>=1.0.0
 
 # Video generation stack (LTX-2.3 local)
 torch==2.5.1

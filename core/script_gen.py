@@ -16,7 +16,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types as genai_types
 from tenacity import AsyncRetrying, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 LOGGER = logging.getLogger(__name__)
@@ -110,15 +111,12 @@ class ScriptGenerator:
             raise ScriptGenerationError("Missing GEMINI_API_KEY in environment.")
         self._request_timeout = float(self.env.get("GEMINI_REQUEST_TIMEOUT_SEC", "60"))
 
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel(
-            model_name=self.cfg.model,
-            generation_config={
-                "temperature": self.cfg.temperature,
-                "top_p": self.cfg.top_p,
-                "max_output_tokens": self.cfg.max_output_tokens,
-                "response_mime_type": "application/json",
-            },
+        self._client = genai.Client(api_key=api_key)
+        self._gen_config = genai_types.GenerateContentConfig(
+            temperature=self.cfg.temperature,
+            top_p=self.cfg.top_p,
+            max_output_tokens=self.cfg.max_output_tokens,
+            response_mime_type="application/json",
         )
 
     async def generate_for_topic(
@@ -169,11 +167,13 @@ class ScriptGenerator:
     async def _generate_raw(self, system_prompt: str, user_prompt: str) -> str:
         def _invoke() -> str:
             try:
-                response = self.model.generate_content(
-                    [
-                        {"role": "user", "parts": [system_prompt]},
-                        {"role": "user", "parts": [user_prompt]},
-                    ]
+                response = self._client.models.generate_content(
+                    model=self.cfg.model,
+                    contents=[
+                        genai_types.Content(role="user", parts=[genai_types.Part(text=system_prompt)]),
+                        genai_types.Content(role="user", parts=[genai_types.Part(text=user_prompt)]),
+                    ],
+                    config=self._gen_config,
                 )
             except Exception as exc:
                 raise ScriptGenerationError(f"Gemini request failed: {exc}") from exc
