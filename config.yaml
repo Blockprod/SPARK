@@ -90,7 +90,7 @@ script_generation:
   include_cta: true
 
 video_generation:
-  provider: static
+  provider: ltx-video
   model_id: Lightricks/LTX-Video
   device: cuda
   dtype: float16

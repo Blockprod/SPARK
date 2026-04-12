@@ -45,6 +45,7 @@ class VideoGenConfig:
     enable_image_conditioning: bool
     conditioning_strength: float
     clips_dir: Path
+    cpu_offload: bool = True
     use_static_fallback: bool = False
 
     @classmethod
@@ -108,6 +109,7 @@ class VideoGenConfig:
             ),
             conditioning_strength=float(coherence_cfg.get("conditioning_strength", 0.6)),
             clips_dir=clips_dir,
+            cpu_offload=bool(video_cfg.get("cpu_offload", True)),
             use_static_fallback=str(video_cfg.get("provider", "ltx-video")).lower() == "static",
         )
 
@@ -343,7 +345,10 @@ class VideoGenerator:
                 self._t2v = LTXPipeline.from_pretrained(
                     self.cfg.model_id, torch_dtype=self.cfg.dtype
                 )
-                self._t2v.enable_model_cpu_offload()
+                if self.cfg.cpu_offload:
+                    self._t2v.enable_model_cpu_offload()
+                else:
+                    self._t2v = self._t2v.to(self.cfg.device)
             except Exception as exc:
                 raise VideoGenerationError(
                     f"Failed to load T2V pipeline: {exc}"
@@ -358,7 +363,10 @@ class VideoGenerator:
                 self._i2v = LTXImageToVideoPipeline.from_pretrained(
                     self.cfg.model_id, torch_dtype=self.cfg.dtype
                 )
-                self._i2v.enable_model_cpu_offload()
+                if self.cfg.cpu_offload:
+                    self._i2v.enable_model_cpu_offload()
+                else:
+                    self._i2v = self._i2v.to(self.cfg.device)
             except Exception as exc:
                 raise VideoGenerationError(
                     f"Failed to load I2V pipeline: {exc}"
