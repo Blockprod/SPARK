@@ -335,7 +335,7 @@ async def generate_audio(
         AudioGenerationError: On configuration or synthesis failure.
     """
     cfg = AudioGenConfig.from_mapping(config)
-    generator = AudioGenerator(cfg=cfg, env=env)
+    generator = AudioGenerator(cfg=cfg)
 
     scene_paths = await generator.generate_scene_audio(scenes=scenes, run_id=run_id)
     narration_path = await generator.generate_full_narration(

@@ -45,6 +45,7 @@ class VideoGenConfig:
     enable_image_conditioning: bool
     conditioning_strength: float
     clips_dir: Path
+    use_static_fallback: bool = False
 
     @classmethod
     def from_mapping(cls, config: dict[str, Any]) -> "VideoGenConfig":
@@ -91,8 +92,8 @@ class VideoGenConfig:
             guidance_scale=float(gen_cfg.get("guidance_scale", 6.5)),
             seed=int(gen_cfg.get("seed", -1)),
             fps=int(pipeline_cfg.get("target_fps", 24)),
-            width=int(pipeline_cfg.get("target_width", 1080)),
-            height=int(pipeline_cfg.get("target_height", 1920)),
+            width=int(pipeline_cfg.get("target_width", 576)),
+            height=int(pipeline_cfg.get("target_height", 1024)),
             max_scene_duration_sec=int(
                 video_cfg.get("scenes", {}).get("max_scene_duration_sec", 10)
             ),
@@ -107,6 +108,7 @@ class VideoGenConfig:
             ),
             conditioning_strength=float(coherence_cfg.get("conditioning_strength", 0.6)),
             clips_dir=clips_dir,
+            use_static_fallback=str(video_cfg.get("provider", "ltx-video")).lower() == "static",
         )
 
 
@@ -186,28 +188,7 @@ class VideoGenerator:
 
             output_path = self.cfg.clips_dir / f"{run_id}_scene{scene_id:02d}.mp4"
 
-            try:
-                if use_conditioning:
-                    clip_path = await self._render_i2v(
-                        scene=scene,
-                        conditioning_image=conditioning_image,
-                        output_path=output_path,
-                        scene_id=scene_id,
-                        seed=effective_seed,
-                    )
-                else:
-                    clip_path = await self._render_t2v(
-                        scene=scene,
-                        output_path=output_path,
-                        scene_id=scene_id,
-                        seed=effective_seed,
-                    )
-            except VideoGenerationError as exc:
-                LOGGER.warning(
-                    "Scene %d generation failed (%s) — using static fallback clip.",
-                    scene_id,
-                    exc,
-                )
+            if self.cfg.use_static_fallback:
                 clip_path = await asyncio.to_thread(
                     _generate_static_fallback,
                     conditioning_image,
@@ -218,6 +199,39 @@ class VideoGenerator:
                     self.cfg.height,
                 )
                 degraded_scenes.append(scene_id)
+            else:
+                try:
+                    if use_conditioning:
+                        clip_path = await self._render_i2v(
+                            scene=scene,
+                            conditioning_image=conditioning_image,
+                            output_path=output_path,
+                            scene_id=scene_id,
+                            seed=effective_seed,
+                        )
+                    else:
+                        clip_path = await self._render_t2v(
+                            scene=scene,
+                            output_path=output_path,
+                            scene_id=scene_id,
+                            seed=effective_seed,
+                        )
+                except VideoGenerationError as exc:
+                    LOGGER.warning(
+                        "Scene %d generation failed (%s) — using static fallback clip.",
+                        scene_id,
+                        exc,
+                    )
+                    clip_path = await asyncio.to_thread(
+                        _generate_static_fallback,
+                        conditioning_image,
+                        output_path,
+                        int(scene.get("duration_sec", 8)),
+                        self.cfg.fps,
+                        self.cfg.width,
+                        self.cfg.height,
+                    )
+                    degraded_scenes.append(scene_id)
 
             clip_paths.append(clip_path)
             await _emit_scene_done(scene_id, clip_path, len(scenes))
@@ -308,7 +322,6 @@ class VideoGenerator:
                     num_frames=num_frames,
                     num_inference_steps=self.cfg.num_inference_steps,
                     guidance_scale=self.cfg.guidance_scale,
-                    strength=self.cfg.conditioning_strength,
                     generator=generator,
                 )
             except Exception as exc:

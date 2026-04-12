@@ -347,16 +347,11 @@ class PostProducer:
             v = video_stream.video
             tmp_srt: Path | None = None
             if srt_path is not None and srt_path.exists():
-                # Copy SRT to a temp file with an ASCII, space-free path to avoid
-                # FFmpeg subtitles filter failures on Windows paths with spaces or unicode.
-                with tempfile.NamedTemporaryFile(
-                    suffix=".srt",
-                    delete=False,
-                    dir=tempfile.gettempdir(),
-                ) as tmp:
-                    tmp_srt = Path(tmp.name)
+                # Write SRT to cwd so ffmpeg receives a relative path — avoids
+                # Windows drive-letter colon escaping issues in filter_complex.
+                tmp_srt = Path.cwd() / f"_sub_{id(srt_path)}.srt"
                 shutil.copy2(srt_path, tmp_srt)
-                srt_escaped = tmp_srt.as_posix().replace(":", "\\:")
+                srt_escaped = tmp_srt.name  # relative filename, no drive letter
                 v = v.filter(
                     "subtitles",
                     filename=srt_escaped,

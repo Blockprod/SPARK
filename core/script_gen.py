@@ -269,6 +269,13 @@ class ScriptGenerator:
             candidate = candidate.strip("`")
             candidate = candidate.replace("json\n", "", 1).strip()
 
+        # Extract the outermost JSON object — guards against thinking-model preamble
+        # or trailing commentary that wraps the actual payload.
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            candidate = candidate[start : end + 1]
+
         try:
             payload = json.loads(candidate)
         except json.JSONDecodeError as exc:

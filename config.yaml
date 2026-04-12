@@ -30,8 +30,8 @@ pipeline:
   max_duration_sec: 60
   max_scenes: 8
   target_aspect_ratio: "9:16"
-  target_width: 1080
-  target_height: 1920
+  target_width: 576
+  target_height: 1024
   target_fps: 24
 
   # Concurrency guard: maximum simultaneous pipeline runs (avoids GPU OOM)
@@ -72,10 +72,10 @@ trends:
 
 script_generation:
   provider: gemini
-  model: gemini-2.0-flash
+  model: gemini-2.5-flash
   temperature: 0.8
   top_p: 0.95
-  max_output_tokens: 4096
+  max_output_tokens: 8192
 
   # Narrative templates rotated at each run to avoid repetition
   template_pool:
@@ -90,20 +90,20 @@ script_generation:
   include_cta: true
 
 video_generation:
-  provider: ltx-video
+  provider: static
   model_id: Lightricks/LTX-Video
   device: cuda
   dtype: float16
   cpu_offload: true  # requis pour 8 Go VRAM — décharge les couches non actives sur CPU
 
   generation:
-    num_inference_steps: 30
-    guidance_scale: 6.5
+    num_inference_steps: 8
+    guidance_scale: 4.0
     seed: -1  # -1 = seed déterministe par run_id (variété visuelle garantie)
     negative_prompt: "blurry, low resolution, watermark, text artifacts, flicker, frame jitter"
 
   scenes:
-    max_scene_duration_sec: 10
+    max_scene_duration_sec: 5
     # transition: hard_cut is implicit — post_prod.py uses hard cuts only
 
   coherence:
