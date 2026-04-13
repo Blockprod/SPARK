@@ -38,12 +38,16 @@ Eviter absolument les hooks informatifs neutres (ex: "Aujourd'hui on va parler d
 Le script doit provoquer au moins une emotion parmi : surprise, curiosite, sentiment d'urgence FOMO.
 
 CONTRAINTES VIDEO (LTX-2)
-Pour chaque scene, le champ visual_prompt DOIT expliciter:
-- le sujet principal
-- le mouvement de camera
-- l'ambiance lumineuse
-- l'epoque historique
-- le style cinematique
+Pour chaque scene, le champ visual_prompt DOIT etre redige en ANGLAIS (LTX-Video ne comprend que l'anglais).
+Le visual_prompt DOIT inclure dans cet ordre, en un seul paragraphe dense de 40 a 70 mots maximum :
+1. SUJET : qui ou quoi est au centre du plan
+2. CAMERA : mouvement precis (slow push-in, static wide shot, aerial pullback...)
+3. LUMIERE : ambiance colorimetrie (golden hour warm, cold blue dawn, single candle amber...)
+4. EPOQUE : marqueurs visuels historiques (vetements, architecture, technologie)
+5. STYLE : reference cinematique (Kubrick symmetrical, documentary handheld, epic Villeneuve...)
+
+Les champs camera_movement, lighting_mood, historical_era, cinematic_style doivent aussi etre en ANGLAIS (termes techniques).
+Regle absolue : visual_prompt + tous les champs visuels = ANGLAIS uniquement. Seuls narration, hook, title, description = francais.
 
 FORMAT DE SORTIE
 - Repondre avec du JSON strict UNIQUEMENT.

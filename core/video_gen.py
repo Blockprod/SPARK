@@ -415,26 +415,24 @@ class VideoGenerator:
 
 
 def _build_full_prompt(scene: dict[str, Any]) -> str:
-    """Assemble the richest possible LTX prompt from all scene fields.
+    """Build the LTX-Video prompt from scene data.
+
+    T5-XXL has a hard limit of 128 tokens (~500 characters).
+    We use only ``visual_prompt`` which already encodes all 5 components
+    (subject, camera, lighting, era, style) per the system prompt spec.
+    Concatenating extra fields causes truncation and incoherent output.
 
     Args:
         scene: Scene dict from validated script payload.
 
     Returns:
-        A single dense English prompt string.
+        A single English prompt string capped at 450 characters.
     """
-    parts: list[str] = []
-
     visual = str(scene.get("visual_prompt", "")).strip()
-    if visual:
-        parts.append(visual)
-
-    for field_name in ("camera_movement", "lighting_mood", "historical_era", "cinematic_style"):
-        value = str(scene.get(field_name, "")).strip()
-        if value:
-            parts.append(value)
-
-    return ". ".join(p.rstrip(".") for p in parts if p)
+    # Cap at 450 chars (≈ 112 tokens, safely under the 128-token limit)
+    if len(visual) > 450:
+        visual = visual[:447] + "..."
+    return visual
 
 
 def _scene_num_frames(
