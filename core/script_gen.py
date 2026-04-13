@@ -329,10 +329,22 @@ class ScriptGenerator:
             accumulated_duration += int(scene["duration_sec"])
 
         if abs(accumulated_duration - duration) > 2:
-            raise ScriptValidationError(
-                "Sum of scene durations must approximately match duration_sec "
-                f"(difference <= 2s). total={accumulated_duration}, duration={duration}"
-            )
+            # Gemini often returns a mismatched duration_sec vs scene sum.
+            # Auto-correct if the actual sum is within the valid pipeline range,
+            # rather than failing the entire pipeline run on a cosmetic mismatch.
+            if self.cfg.min_duration_sec <= accumulated_duration <= self.cfg.max_duration_sec:
+                LOGGER.warning(
+                    "duration_sec mismatch (total=%ds vs declared=%ds) — "
+                    "auto-correcting duration_sec to actual scene sum.",
+                    accumulated_duration,
+                    duration,
+                )
+                payload["duration_sec"] = accumulated_duration
+            else:
+                raise ScriptValidationError(
+                    "Sum of scene durations must approximately match duration_sec "
+                    f"(difference <= 2s). total={accumulated_duration}, duration={duration}"
+                )
 
         metadata = payload.get("metadata")
         if not isinstance(metadata, dict):
