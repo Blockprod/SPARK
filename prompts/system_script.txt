@@ -27,6 +27,15 @@ CONTRAINTES NARRATIVES
 - Conclure avec une chute memorisable + CTA discret.
 - Texte integralement en francais.
 
+CONTRAINTE NARRATION STRICTE (synchronisation TTS - OBLIGATOIRE)
+La voix synthetique lit a ~150 mots/minute (speed 1.1 → ~165 mpm effectifs).
+CHAQUE scene.narration ne doit PAS depasser : duration_sec × 2.5 mots.
+  Exemples : 8s = 20 mots max | 10s = 25 mots max | 12s = 30 mots max
+La narration_text totale (toutes scenes) ne doit pas depasser duration_sec_total × 2.5 mots.
+  Exemple pour 55s total : 137 mots maximum toutes scenes confondues.
+Phrases courtes, percutantes. Pas de repetitions, pas de parentheses, pas de virgules superflues.
+Si tu depasses ce quota, le son sera coupe avant la fin : c'est un echec total.
+
 DECLENCHEURS EMOTIONNELS
 Le hook des 3 premieres secondes est decisif pour la retention sur Shorts.
 Le hook DOIT utiliser l'un de ces 3 patterns :

@@ -349,11 +349,26 @@ class PostProducer:
         final_path = self.cfg.renders_dir / f"{run_id}_final.mp4"
 
         def _run() -> Path:
+            # Probe durations so we can extend video if narration is longer.
+            # This ensures the full narration is heard even if the video clips
+            # are shorter than the TTS output (common with verbose Gemini scripts).
+            vid_dur = _probe_duration(str(video_path))
+            nar_dur = _probe_duration(str(narration_path))
+            extra_sec = max(0.0, nar_dur - vid_dur + 0.25)  # 0.25s buffer
+
             video_stream = ffmpeg.input(str(video_path))
             narration_stream = ffmpeg.input(str(narration_path))
 
             # Video — optionally burn subtitles
             v = video_stream.video
+            # Hold last frame if narration outlasts video clips
+            if extra_sec > 0.1:
+                LOGGER.info(
+                    "Narration (%.1fs) > video (%.1fs): extending video by %.1fs (tpad).",
+                    nar_dur, vid_dur, extra_sec,
+                )
+                v = v.filter("tpad", stop_mode="clone", stop_duration=extra_sec)
+
             tmp_srt: Path | None = None
             if srt_path is not None and srt_path.exists():
                 # Write SRT to cwd so ffmpeg receives a relative path — avoids
@@ -375,7 +390,7 @@ class PostProducer:
                     [ambient, narration],
                     "amix",
                     inputs=2,
-                    duration="first",
+                    duration="shortest",
                     dropout_transition=2,
                 )
             else:
@@ -483,6 +498,15 @@ def _apply_ass_style(subs: pysubs2.SSAFile, cfg: PostProdConfig) -> None:
         bold=False,
     )
     subs.styles["Default"] = style
+
+
+def _probe_duration(file_path: str) -> float:
+    """Return the duration in seconds of a media file, or 0.0 on error."""
+    try:
+        probe = ffmpeg.probe(file_path)
+        return float(probe["format"].get("duration", 0.0))
+    except ffmpeg.Error:
+        return 0.0
 
 
 def _probe_has_audio(file_path: str) -> bool:
