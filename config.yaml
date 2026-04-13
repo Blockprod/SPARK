@@ -94,16 +94,16 @@ video_generation:
   model_id: Lightricks/LTX-Video
   device: cuda
   dtype: float16
-  cpu_offload: true  # requis pour 8 Go VRAM — décharge les couches non actives sur CPU
+  cpu_offload: true  # requis même sur A100-40Go — modèle 28Go > VRAM disponible
 
   generation:
-    num_inference_steps: 8
-    guidance_scale: 4.0
+    num_inference_steps: 30
+    guidance_scale: 7.0
     seed: -1  # -1 = seed déterministe par run_id (variété visuelle garantie)
     negative_prompt: "blurry, low resolution, watermark, text artifacts, flicker, frame jitter"
 
   scenes:
-    max_scene_duration_sec: 5
+    max_scene_duration_sec: 10
     # transition: hard_cut is implicit — post_prod.py uses hard cuts only
 
   coherence:
