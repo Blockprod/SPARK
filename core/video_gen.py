@@ -8,6 +8,7 @@ image-to-video conditioning: the last frame of scene N seeds scene N+1.
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
 import re
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ import torch
 from diffusers import LTXImageToVideoPipeline, LTXPipeline
 from diffusers.utils import export_to_video
 from PIL import Image
+from transformers import T5EncoderModel
 
 LOGGER = logging.getLogger(__name__)
 
@@ -342,8 +344,22 @@ class VideoGenerator:
         if self._t2v is None:
             LOGGER.info("Loading LTX T2V pipeline from '%s'…", self.cfg.model_id)
             try:
+                # Pre-load T5-XXL text encoder in float16 to halve peak RAM.
+                # The HF checkpoints are float32 (~19 Go); loading the full
+                # pipeline in one shot causes OOM on Colab (≤51 Go RAM).
+                LOGGER.info("Pre-loading T5 text encoder in %s…", self.cfg.dtype)
+                text_encoder = T5EncoderModel.from_pretrained(
+                    self.cfg.model_id,
+                    subfolder="text_encoder",
+                    torch_dtype=self.cfg.dtype,
+                    low_cpu_mem_usage=True,
+                )
+                gc.collect()
+
                 self._t2v = LTXPipeline.from_pretrained(
-                    self.cfg.model_id, torch_dtype=self.cfg.dtype
+                    self.cfg.model_id,
+                    text_encoder=text_encoder,
+                    torch_dtype=self.cfg.dtype,
                 )
                 if self.cfg.cpu_offload:
                     self._t2v.enable_model_cpu_offload()
@@ -360,8 +376,26 @@ class VideoGenerator:
         if self._i2v is None:
             LOGGER.info("Loading LTX I2V pipeline from '%s'…", self.cfg.model_id)
             try:
+                # Reuse heavy components from T2V pipeline if already loaded
+                # to avoid doubling RAM usage (~28 Go saved).
+                shared_kwargs: dict[str, Any] = {"torch_dtype": self.cfg.dtype}
+                if self._t2v is not None:
+                    shared_kwargs["text_encoder"] = self._t2v.text_encoder
+                    shared_kwargs["tokenizer"] = self._t2v.tokenizer
+                    shared_kwargs["vae"] = self._t2v.vae
+                else:
+                    LOGGER.info("Pre-loading T5 text encoder in %s…", self.cfg.dtype)
+                    text_encoder = T5EncoderModel.from_pretrained(
+                        self.cfg.model_id,
+                        subfolder="text_encoder",
+                        torch_dtype=self.cfg.dtype,
+                        low_cpu_mem_usage=True,
+                    )
+                    gc.collect()
+                    shared_kwargs["text_encoder"] = text_encoder
+
                 self._i2v = LTXImageToVideoPipeline.from_pretrained(
-                    self.cfg.model_id, torch_dtype=self.cfg.dtype
+                    self.cfg.model_id, **shared_kwargs
                 )
                 if self.cfg.cpu_offload:
                     self._i2v.enable_model_cpu_offload()
