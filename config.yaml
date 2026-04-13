@@ -32,7 +32,7 @@ pipeline:
   target_aspect_ratio: "9:16"
   target_width: 576
   target_height: 1024
-  target_fps: 24
+  target_fps: 25
 
   # Concurrency guard: maximum simultaneous pipeline runs (avoids GPU OOM)
   max_concurrent_runs: 1
@@ -90,27 +90,23 @@ script_generation:
   include_cta: true
 
 video_generation:
-  provider: ltx-video
-  model_id: Lightricks/LTX-Video
+  provider: ltx-2
+  # Model paths — set by Colab cell 3b (HF download) and cell 5 (verify)
+  checkpoint_path: /content/models/ltx2/ltx-2.3-22b-distilled-1.1.safetensors
+  spatial_upsampler_path: /content/models/ltx2/ltx-2.3-spatial-upscaler-x2-1.1.safetensors
+  gemma_root: /content/models/ltx2/gemma-3-12b-it-qat-q4_0-unquantized
   device: cuda
-  dtype: float16
-  cpu_offload: true  # requis même sur A100-40Go — modèle 28Go > VRAM disponible
+  fp8: true   # FP8-cast quantization — required for A100-40GB (22B model)
 
   generation:
-    num_inference_steps: 30
-    guidance_scale: 3.0   # LTX-Video est entraîné avec CFG ~3 — au-delà de 5 = bruit abstrait
-    seed: -1  # -1 = seed déterministe par run_id (variété visuelle garantie)
-    negative_prompt: "worst quality, inconsistent motion, blurry, jittery, distorted"
+    seed: -1  # -1 = seed deterministe par run_id
 
   scenes:
     max_scene_duration_sec: 10
-    # transition: hard_cut is implicit — post_prod.py uses hard cuts only
 
   coherence:
     enable_image_conditioning: true
     conditioning_strength: 0.6
-    # If empty, first generated keyframe can be used as reference by runtime logic
-    reference_image_path: ""
 
 audio_generation:
   active_backend: kokoro

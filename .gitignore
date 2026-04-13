@@ -21,6 +21,9 @@ outputs/**
 logs/**
 !logs/.gitkeep
 
+# Local model binaries (too large for GitHub — downloaded by Colab)
+models/
+
 # Audit results and action plans (contain internal architecture details)
 tasks/audits/resultat/
 tasks/plans/

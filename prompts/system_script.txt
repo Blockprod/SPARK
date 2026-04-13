@@ -48,12 +48,20 @@ Le script doit provoquer au moins une emotion parmi : surprise, curiosite, senti
 
 CONTRAINTES VIDEO (LTX-2)
 Pour chaque scene, le champ visual_prompt DOIT etre redige en ANGLAIS (LTX-Video ne comprend que l'anglais).
-Le visual_prompt DOIT inclure dans cet ordre, en un seul paragraphe dense de 40 a 70 mots maximum :
+Le visual_prompt DOIT inclure dans cet ordre, en un seul paragraphe dense de 100 a 200 mots :
 1. SUJET : qui ou quoi est au centre du plan
-2. CAMERA : mouvement precis (slow push-in, static wide shot, aerial pullback...)
-3. LUMIERE : ambiance colorimetrie (golden hour warm, cold blue dawn, single candle amber...)
-4. EPOQUE : marqueurs visuels historiques (vetements, architecture, technologie)
-5. STYLE : reference cinematique (Kubrick symmetrical, documentary handheld, epic Villeneuve...)
+2. ACTION : description chronologique des mouvements et actions du sujet (present continu)
+3. CAMERA : mouvement precis (slow push-in, static wide shot, aerial pullback...)
+4. LUMIERE : ambiance colorimetrie (golden hour warm, cold blue dawn, single candle amber...)
+5. EPOQUE : marqueurs visuels historiques (vetements, architecture, technologie)
+6. STYLE : reference cinematique (Kubrick symmetrical, documentary handheld, epic Villeneuve...)
+7. AMBIANCE : textures, particules, atmosphere (dust motes, fog, rain streaks, lens flare...)
+
+Regles de redaction du visual_prompt (LTX-2.3) :
+- Decrire les actions dans l'ordre chronologique, au present continu
+- Privilegier les descriptions concretes et visuelles, jamais de labels emotionnels abstraits
+- Eviter tout texte, logo, ou panneau visible dans la scene
+- 4 a 8 phrases descriptives par prompt, style "directeur de la photographie"
 
 Les champs camera_movement, lighting_mood, historical_era, cinematic_style doivent aussi etre en ANGLAIS (termes techniques).
 Regle absolue : visual_prompt + tous les champs visuels = ANGLAIS uniquement. Seuls narration, hook, title, description = francais.

@@ -15,16 +15,14 @@ tenacity==9.0.0
 # LLM script generation (Gemini)
 google-genai>=1.0.0
 
-# Video generation stack (LTX-2.3 local)
+# Video generation stack (LTX-2.3 — 22B native pipeline)
+# ltx-core and ltx-pipelines are installed from the LTX-2 repo (pip install -e)
+# NOT from PyPI — see colab_runner.ipynb cell 2
 torch==2.5.1
 torchvision==0.20.1
 torchaudio==2.5.1
-diffusers>=0.32.0,<0.34.0
-transformers==4.46.3
-accelerate==1.2.1
 safetensors==0.4.5
 huggingface-hub==0.27.1
-sentencepiece==0.2.0
 opencv-python==4.10.0.84
 Pillow==11.1.0
 numpy==2.2.2
