@@ -98,9 +98,9 @@ video_generation:
 
   generation:
     num_inference_steps: 30
-    guidance_scale: 7.0
+    guidance_scale: 3.0   # LTX-Video est entraîné avec CFG ~3 — au-delà de 5 = bruit abstrait
     seed: -1  # -1 = seed déterministe par run_id (variété visuelle garantie)
-    negative_prompt: "blurry, low resolution, watermark, text artifacts, flicker, frame jitter"
+    negative_prompt: "worst quality, inconsistent motion, blurry, jittery, distorted"
 
   scenes:
     max_scene_duration_sec: 10
