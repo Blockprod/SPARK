@@ -145,6 +145,19 @@ class ScriptGenerator:
             raise ScriptValidationError("Topic exceeds 500 characters.")
 
         system_prompt = self._read_prompt_file("system_script.txt")
+        # Append LTX-Video art direction guidelines + few-shot examples so that
+        # Gemini produces visual_prompts that the model can render well.
+        try:
+            video_guide = self._read_prompt_file("system_video.txt")
+            system_prompt = (
+                system_prompt
+                + "\n\n---\nART DIRECTION & FEW-SHOT EXAMPLES FOR visual_prompt FIELDS\n"
+                + video_guide
+            )
+        except ScriptGenerationError:
+            LOGGER.warning(
+                "system_video.txt not found — visual_prompt quality may be lower."
+            )
         user_prompt = self._build_user_prompt(
             topic=topic, trend_context=trend_context or {}, performance_data=performance_data
         )

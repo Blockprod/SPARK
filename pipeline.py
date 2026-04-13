@@ -380,6 +380,7 @@ async def _stage_post_prod(
     scenes: list[dict[str, Any]],
     run_id: str,
     run_ctx: dict[str, Any],
+    scene_audio_paths: list[Path] | None = None,
 ) -> dict[str, str]:
     from core.post_prod import run_post_production
 
@@ -391,6 +392,7 @@ async def _stage_post_prod(
             narration_path=narration_path,
             scenes=scenes,
             run_id=run_id,
+            scene_audio_paths=scene_audio_paths,
         )
     except Exception as exc:
         raise PipelineError(f"Post-production failed: {exc}") from exc
@@ -613,12 +615,14 @@ async def run_pipeline(
             await _progress("audio_start", {})
             audio_result = await _stage_audio(config, env, scenes, run_id, run_ctx)
             narration_path = Path(audio_result["narration_path"])
+            scene_audio_paths = [Path(p) for p in audio_result.get("scene_paths", [])]
             await _progress("audio_done", {"narration": str(narration_path)})
 
             # Stage 5 — Post-production
             await _progress("postprod_start", {})
             postprod_result = await _stage_post_prod(
-                config, clip_paths, narration_path, scenes, run_id, run_ctx
+                config, clip_paths, narration_path, scenes, run_id, run_ctx,
+                scene_audio_paths=scene_audio_paths,
             )
             final_video_path = Path(postprod_result["final_video"])
             await _progress("postprod_done", {"final_video": str(final_video_path)})

@@ -56,6 +56,7 @@ class PostProdConfig:
     line_padding_ms: int
     font_name: str
     font_size: int
+    bold: bool
     primary_color: str
     outline_color: str
     back_color: str
@@ -117,6 +118,7 @@ class PostProdConfig:
             line_padding_ms=int(sub_cfg.get("line_padding_ms", 120)),
             font_name=str(style_cfg.get("font_name", "Arial")),
             font_size=int(style_cfg.get("font_size", 54)),
+            bold=bool(style_cfg.get("bold", True)),
             primary_color=str(style_cfg.get("primary_color", "&H00FFFFFF")),
             outline_color=str(style_cfg.get("outline_color", "&H00000000")),
             back_color=str(style_cfg.get("back_color", "&H64000000")),
@@ -153,6 +155,7 @@ class PostProducer:
         narration_path: Path,
         scenes: list[dict[str, Any]],
         run_id: str,
+        scene_audio_paths: list[Path] | None = None,
     ) -> dict[str, str]:
         """Run the full post-production pipeline.
 
@@ -161,6 +164,7 @@ class PostProducer:
             narration_path: Concatenated narration WAV file.
             scenes: Validated scene list from script package (for SRT generation).
             run_id: Unique run identifier for output filenames.
+            scene_audio_paths: Optional per-scene WAV paths for accurate subtitle timing.
 
         Returns:
             Dictionary with keys:
@@ -181,7 +185,7 @@ class PostProducer:
             )
 
         concat_path = await self._concatenate_clips(clip_paths, run_id)
-        srt_path = await self._generate_srt(scenes, run_id)
+        srt_path = await self._generate_srt(scenes, run_id, scene_audio_paths=scene_audio_paths)
         final_path = await self._mix_and_export(
             video_path=concat_path,
             narration_path=narration_path,
@@ -252,16 +256,23 @@ class PostProducer:
         return await asyncio.to_thread(_run)
 
     async def _generate_srt(
-        self, scenes: list[dict[str, Any]], run_id: str
+        self, scenes: list[dict[str, Any]], run_id: str,
+        scene_audio_paths: list[Path] | None = None,
     ) -> Path:
-        """Build a timed SRT file from scene narration texts.
+        """Build a timed ASS subtitle file from scene narration texts.
+
+        When ``scene_audio_paths`` is provided the actual per-scene TTS
+        audio duration is used for timing instead of the nominal video
+        scene duration.  This ensures subtitles track the voice-over
+        precisely regardless of clip length.
 
         Args:
             scenes: Scene list with 'narration' and 'duration_sec' fields.
             run_id: Run identifier for output filename.
+            scene_audio_paths: Optional per-scene WAV files for accurate timing.
 
         Returns:
-            Path to the written SRT file.
+            Path to the written ASS file.
 
         Raises:
             PostProductionError: If scene data is malformed.
@@ -275,29 +286,33 @@ class PostProducer:
             subs.info["PlayResY"] = str(self.cfg.video_height)
 
             current_ms = 0
-            for scene in scenes:
+            for i, scene in enumerate(scenes):
                 duration_sec = int(scene.get("duration_sec", 0))
+                # Use actual TTS audio duration for precise subtitle/audio sync.
+                duration_ms = duration_sec * 1000
+                if scene_audio_paths and i < len(scene_audio_paths):
+                    actual = _probe_duration(str(scene_audio_paths[i]))
+                    if actual > 0.1:
+                        duration_ms = int(actual * 1000)
+
                 narration = str(scene.get("narration", "")).strip()
 
-                if not narration or duration_sec <= 0:
-                    current_ms += duration_sec * 1000
+                if not narration or duration_ms <= 0:
+                    current_ms += duration_ms
                     continue
 
-                end_ms = current_ms + duration_sec * 1000
+                end_ms = current_ms + duration_ms
                 lines = _wrap_text(
                     narration,
                     max_chars=self.cfg.max_chars_per_line,
                     max_lines=self.cfg.max_lines,
                 )
 
+                chunk_dur_ms = duration_ms // max(len(lines), 1)
                 for chunk_idx, chunk in enumerate(lines):
-                    chunk_start = current_ms + chunk_idx * (
-                        (duration_sec * 1000) // max(len(lines), 1)
-                    )
+                    chunk_start = current_ms + chunk_idx * chunk_dur_ms
                     chunk_end = min(
-                        chunk_start
-                        + (duration_sec * 1000) // max(len(lines), 1)
-                        - self.cfg.line_padding_ms,
+                        chunk_start + chunk_dur_ms - self.cfg.line_padding_ms,
                         end_ms,
                     )
                     if chunk_start >= chunk_end:
@@ -495,7 +510,7 @@ def _apply_ass_style(subs: pysubs2.SSAFile, cfg: PostProdConfig) -> None:
         shadow=cfg.shadow,
         alignment=cfg.alignment,
         marginv=cfg.margin_v,
-        bold=False,
+        bold=cfg.bold,
     )
     subs.styles["Default"] = style
 
@@ -537,6 +552,7 @@ async def run_post_production(
     narration_path: Path,
     scenes: list[dict[str, Any]],
     run_id: str,
+    scene_audio_paths: list[Path] | None = None,
 ) -> dict[str, str]:
     """Public async entry point for post-production.
 
@@ -546,6 +562,7 @@ async def run_post_production(
         narration_path: Full narration WAV from audio_gen.
         scenes: Validated scene list from script package (for SRT timing).
         run_id: Unique identifier for this pipeline run.
+        scene_audio_paths: Optional per-scene WAV paths for accurate subtitle timing.
 
     Returns:
         Dictionary with:
@@ -562,5 +579,6 @@ async def run_post_production(
         narration_path=narration_path,
         scenes=scenes,
         run_id=run_id,
+        scene_audio_paths=scene_audio_paths,
     )
     return result

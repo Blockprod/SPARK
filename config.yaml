@@ -142,14 +142,15 @@ post_production:
     line_padding_ms: 120
     style:
       font_name: Arial
-      font_size: 55
+      font_size: 62
+      bold: true
       primary_color: "&H00FFFFFF"
       outline_color: "&H00000000"
       back_color: "&H80000000"
       outline: 3
       shadow: 1
       alignment: 2
-      margin_v: 60
+      margin_v: 180
 
 uploader:
   provider: youtube_data_api_v3

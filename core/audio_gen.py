@@ -337,10 +337,17 @@ async def generate_audio(
     cfg = AudioGenConfig.from_mapping(config)
     generator = AudioGenerator(cfg=cfg)
 
-    scene_paths = await generator.generate_scene_audio(scenes=scenes, run_id=run_id)
+    # generate_full_narration internally calls generate_scene_audio.
+    # Previously generate_scene_audio was called separately here, doubling
+    # synthesis time.  Removed — scene paths are reconstructed from the
+    # deterministic naming convention used by generate_scene_audio.
     narration_path = await generator.generate_full_narration(
         scenes=scenes, run_id=run_id
     )
+    scene_paths = [
+        cfg.audio_dir / f"{run_id}_scene{int(s.get('scene_id', i + 1)):02d}.wav"
+        for i, s in enumerate(scenes)
+    ]
 
     return {
         "scene_paths": [str(p) for p in scene_paths],
