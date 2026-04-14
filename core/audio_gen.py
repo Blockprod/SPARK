@@ -36,6 +36,7 @@ class AudioGenConfig:
     """Configuration for the audio generation stage."""
 
     language: str
+    active_backend: str
 
     # Kokoro
     kokoro_model_path: str
@@ -44,6 +45,11 @@ class AudioGenConfig:
     kokoro_speed: float
     kokoro_sample_rate: int
     kokoro_output_format: str
+
+    # Edge TTS
+    edge_tts_voice: str
+    edge_tts_rate: str
+    edge_tts_pitch: str
 
     # Outputs
     audio_dir: Path
@@ -70,16 +76,21 @@ class AudioGenConfig:
             raise AudioGenerationError("Missing 'paths' in configuration.")
 
         kokoro_cfg = audio_cfg.get("kokoro", {})
+        edge_cfg = audio_cfg.get("edge_tts", {})
         audio_dir = Path(str(paths_cfg.get("audio_dir", "./outputs/audio"))).resolve()
 
         return cls(
             language=str(audio_cfg.get("language", "fr-fr")),
+            active_backend=str(audio_cfg.get("active_backend", "edge_tts")),
             kokoro_model_path=str(kokoro_cfg.get("model_path", "./models/kokoro-v1.0.fp16.onnx")),
             kokoro_voices_path=str(kokoro_cfg.get("voices_path", "./models/voices-v1.0.bin")),
             kokoro_voice=str(kokoro_cfg.get("voice", "ff_siwis")),
             kokoro_speed=float(kokoro_cfg.get("speed", 1.0)),
             kokoro_sample_rate=int(kokoro_cfg.get("sample_rate", 24000)),
             kokoro_output_format=str(kokoro_cfg.get("output_format", "wav")),
+            edge_tts_voice=str(edge_cfg.get("voice", "fr-FR-DeniseNeural")),
+            edge_tts_rate=str(edge_cfg.get("rate", "+0%")),
+            edge_tts_pitch=str(edge_cfg.get("pitch", "+0Hz")),
             audio_dir=audio_dir,
         )
 
@@ -191,6 +202,74 @@ class KokoroBackend(TTSBackend):
 
 
 # ---------------------------------------------------------------------------
+# Edge TTS backend (Microsoft neural TTS — free, requires internet)
+# ---------------------------------------------------------------------------
+
+
+class EdgeTTSBackend(TTSBackend):
+    """Edge TTS via the `edge-tts` package. Excellent French voices.
+
+    Voices recommended for French:
+      - fr-FR-DeniseNeural  (female, warm, clear)
+      - fr-FR-HenriNeural   (male, professional)
+      - fr-FR-VivienneNeural (female, expressive)
+    """
+
+    def __init__(self, cfg: AudioGenConfig) -> None:
+        self.cfg = cfg
+
+    async def synthesize(self, text: str, output_path: Path) -> Path:
+        """Synthesize speech via Edge TTS and write MP3/WAV to output_path.
+
+        Args:
+            text: Plain French narration text.
+            output_path: Target audio file path (will use .mp3 extension).
+
+        Returns:
+            Path to the written audio file.
+
+        Raises:
+            AudioGenerationError: If synthesis or write fails.
+        """
+        if not text or not text.strip():
+            raise AudioGenerationError("Cannot synthesize empty narration text.")
+
+        try:
+            import edge_tts
+        except ImportError as exc:
+            raise AudioGenerationError(
+                "edge-tts is not installed. Run: pip install edge-tts"
+            ) from exc
+
+        # Edge TTS always produces MP3 — use .mp3 extension regardless of config
+        mp3_path = output_path.with_suffix(".mp3")
+        mp3_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            communicate = edge_tts.Communicate(
+                text=text.strip(),
+                voice=self.cfg.edge_tts_voice,
+                rate=self.cfg.edge_tts_rate,
+                pitch=self.cfg.edge_tts_pitch,
+            )
+            await communicate.save(str(mp3_path))
+        except Exception as exc:
+            raise AudioGenerationError(
+                f"Edge TTS synthesis failed: {exc}"
+            ) from exc
+
+        if not mp3_path.exists() or mp3_path.stat().st_size < 100:
+            raise AudioGenerationError(
+                f"Edge TTS produced empty or missing file: {mp3_path}"
+            )
+
+        LOGGER.debug(
+            "Edge TTS wrote %s (voice=%s)", mp3_path, self.cfg.edge_tts_voice
+        )
+        return mp3_path
+
+
+# ---------------------------------------------------------------------------
 # AudioGenerator orchestrator
 # ---------------------------------------------------------------------------
 
@@ -200,8 +279,16 @@ class AudioGenerator:
 
     def __init__(self, cfg: AudioGenConfig) -> None:
         self.cfg = cfg
-        LOGGER.info("Audio backend: Kokoro local ONNX (voice=%s)", cfg.kokoro_voice)
-        self._backend: TTSBackend = KokoroBackend(cfg=cfg)
+        backend_name = cfg.active_backend.lower().strip()
+        if backend_name == "edge_tts":
+            LOGGER.info(
+                "Audio backend: Edge TTS (voice=%s rate=%s)",
+                cfg.edge_tts_voice, cfg.edge_tts_rate,
+            )
+            self._backend: TTSBackend = EdgeTTSBackend(cfg=cfg)
+        else:
+            LOGGER.info("Audio backend: Kokoro local ONNX (voice=%s)", cfg.kokoro_voice)
+            self._backend = KokoroBackend(cfg=cfg)
 
     async def generate_scene_audio(
         self, scenes: list[dict[str, Any]], run_id: str
@@ -262,46 +349,70 @@ class AudioGenerator:
             AudioGenerationError: If synthesis or concatenation fails.
         """
         scene_paths = await self.generate_scene_audio(scenes=scenes, run_id=run_id)
-        concat_path = self.cfg.audio_dir / f"{run_id}_narration_full.wav"
+        # Detect output extension from actual files produced (wav or mp3)
+        out_ext = scene_paths[0].suffix if scene_paths else ".wav"
+        concat_path = self.cfg.audio_dir / f"{run_id}_narration_full{out_ext}"
 
         def _concat() -> Path:
-            segments: list[np.ndarray] = []
-            sample_rate: int | None = None
-
-            for path in scene_paths:
+            concat_path.parent.mkdir(parents=True, exist_ok=True)
+            if out_ext == ".wav":
+                # Kokoro path: read float32 arrays and concatenate with soundfile
+                segments: list[np.ndarray] = []
+                sample_rate: int | None = None
+                for path in scene_paths:
+                    try:
+                        data, sr = sf.read(str(path), dtype="float32")
+                    except Exception as exc:
+                        raise AudioGenerationError(
+                            f"Failed to read audio segment {path}: {exc}"
+                        ) from exc
+                    if sample_rate is None:
+                        sample_rate = sr
+                    elif sr != sample_rate:
+                        raise AudioGenerationError(
+                            f"Inconsistent sample rates: {sr} vs {sample_rate} in {path}"
+                        )
+                    segments.append(data)
+                if not segments or sample_rate is None:
+                    raise AudioGenerationError("No audio segments to concatenate.")
+                combined = np.concatenate(segments, axis=0)
                 try:
-                    data, sr = sf.read(str(path), dtype="float32")
+                    sf.write(str(concat_path), combined, samplerate=sample_rate)
                 except Exception as exc:
                     raise AudioGenerationError(
-                        f"Failed to read audio segment {path}: {exc}"
+                        f"Failed to write concatenated narration: {exc}"
                     ) from exc
-
-                if sample_rate is None:
-                    sample_rate = sr
-                elif sr != sample_rate:
-                    raise AudioGenerationError(
-                        f"Inconsistent sample rates across segments: "
-                        f"{sr} != {sample_rate} in {path}"
+                dur = len(combined) / sample_rate
+            else:
+                # Edge TTS / MP3 path: use ffmpeg concat demuxer (handles any format)
+                import subprocess
+                list_file = self.cfg.audio_dir / f"{run_id}_concat_list.txt"
+                list_file.write_text(
+                    "".join(f"file '{p.as_posix()}'\n" for p in scene_paths),
+                    encoding="utf-8",
+                )
+                try:
+                    result = subprocess.run(
+                        [
+                            "ffmpeg", "-y",
+                            "-f", "concat", "-safe", "0",
+                            "-i", str(list_file),
+                            "-c", "copy",
+                            str(concat_path),
+                        ],
+                        check=True,
+                        capture_output=True,
                     )
-                segments.append(data)
+                except subprocess.CalledProcessError as exc:
+                    stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
+                    raise AudioGenerationError(
+                        f"FFmpeg audio concat failed: {stderr}"
+                    ) from exc
+                finally:
+                    list_file.unlink(missing_ok=True)
+                dur = 0.0  # duration computed later by post_prod ffprobe
 
-            if not segments or sample_rate is None:
-                raise AudioGenerationError("No audio segments to concatenate.")
-
-            combined = np.concatenate(segments, axis=0)
-            concat_path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                sf.write(str(concat_path), combined, samplerate=sample_rate)
-            except Exception as exc:
-                raise AudioGenerationError(
-                    f"Failed to write concatenated narration: {exc}"
-                ) from exc
-
-            LOGGER.info(
-                "Concatenated narration written → %s (%.2fs)",
-                concat_path,
-                len(combined) / sample_rate,
-            )
+            LOGGER.info("Full narration written -> %s (%.1fs)", concat_path, dur)
             return concat_path
 
         return await asyncio.to_thread(_concat)
@@ -344,8 +455,10 @@ async def generate_audio(
     narration_path = await generator.generate_full_narration(
         scenes=scenes, run_id=run_id
     )
+    # Determine correct extension based on active backend
+    _ext = ".mp3" if cfg.active_backend.lower() == "edge_tts" else ".wav"
     scene_paths = [
-        cfg.audio_dir / f"{run_id}_scene{int(s.get('scene_id', i + 1)):02d}.wav"
+        cfg.audio_dir / f"{run_id}_scene{int(s.get('scene_id', i + 1)):02d}{_ext}"
         for i, s in enumerate(scenes)
     ]
 

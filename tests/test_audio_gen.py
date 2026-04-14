@@ -19,6 +19,7 @@ from core.audio_gen import (
     AudioGenConfig,
     AudioGenerationError,
     AudioGenerator,
+    EdgeTTSBackend,
     KokoroBackend,
 )
 
@@ -94,9 +95,23 @@ class TestAudioGenConfigFromMapping:
 
 class TestAudioGeneratorBackendSelection:
     def test_kokoro_backend_selected(self) -> None:
-        cfg = AudioGenConfig.from_mapping(_base_config())
+        config = _base_config()
+        config["audio_generation"]["active_backend"] = "kokoro"
+        cfg = AudioGenConfig.from_mapping(config)
         gen = AudioGenerator(cfg=cfg)
         assert isinstance(gen._backend, KokoroBackend)
+
+    def test_edge_tts_backend_selected_by_default(self) -> None:
+        cfg = AudioGenConfig.from_mapping(_base_config())
+        gen = AudioGenerator(cfg=cfg)
+        assert isinstance(gen._backend, EdgeTTSBackend)
+
+    def test_edge_tts_backend_selected_explicitly(self) -> None:
+        config = _base_config()
+        config["audio_generation"]["active_backend"] = "edge_tts"
+        cfg = AudioGenConfig.from_mapping(config)
+        gen = AudioGenerator(cfg=cfg)
+        assert isinstance(gen._backend, EdgeTTSBackend)
 
 
 

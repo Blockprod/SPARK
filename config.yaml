@@ -109,15 +109,24 @@ video_generation:
     conditioning_strength: 0.6
 
 audio_generation:
-  active_backend: kokoro
-  language: fr-fr  # espeak-ng lang code — required by Kokoro for French
+  active_backend: edge_tts   # edge_tts (recommended) or kokoro
+
+  # Edge TTS — Microsoft Neural TTS, free, no GPU needed, excellent French quality
+  # Voices: fr-FR-DeniseNeural (warm female), fr-FR-HenriNeural (professional male)
+  #         fr-FR-VivienneNeural (expressive female), fr-FR-EloiseNeural (young female)
+  edge_tts:
+    voice: fr-FR-DeniseNeural
+    rate: "-5%"    # slight slowdown for clearer articulation on Shorts
+    pitch: "+0Hz"
+
+  language: fr-fr  # used by Kokoro fallback only
 
   kokoro:
-    # Model files must be downloaded separately — see README for commands
+    # Kokoro local ONNX — fallback if edge_tts unavailable
     model_path: ./models/kokoro-v1.0.fp16.onnx
     voices_path: ./models/voices-v1.0.bin
-    voice: ff_siwis  # only FR voice available in Kokoro-82M (hexgrad/Kokoro-82M)
-    speed: 1.1
+    voice: ff_siwis  # only FR voice in Kokoro-82M
+    speed: 1.0
     sample_rate: 24000
     output_format: wav
 
