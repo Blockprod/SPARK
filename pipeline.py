@@ -576,7 +576,19 @@ async def run_pipeline(
             # Stage 1 — Trends (+ fire deferred analytics in background)
             await _progress("trends_start", {})
             asyncio.create_task(_process_pending_analytics(config, env))
-            topics = await _stage_trends(config, env, run_ctx)
+            try:
+                topics = await _stage_trends(config, env, run_ctx)
+            except PipelineError as _trend_exc:
+                if topic:
+                    # Topic explicitly provided — trend discovery is optional.
+                    LOGGER.warning(
+                        "[trends] Trend discovery failed (topic provided, continuing): %s",
+                        _trend_exc,
+                    )
+                    topics = []
+                    run_ctx["topics_fetched"] = 0
+                else:
+                    raise
             await _progress("trends_done", {"count": len(topics)})
 
             if not topic:
