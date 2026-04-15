@@ -292,25 +292,28 @@ class VideoGenerator:
                     UniPCMultistepScheduler,
                 )
 
+                # device_map="auto" loads weights shard-by-shard directly
+                # onto GPU/CPU without staging everything in CPU RAM first.
+                # This avoids OOM on T4 (12.7 GB RAM, 16 GB VRAM) when the
+                # UMT5-XXL text encoder alone is ~18 GB.
                 vae = AutoencoderKLWan.from_pretrained(
                     self.cfg.model_id,
                     subfolder="vae",
                     torch_dtype=torch.float32,
+                    device_map="auto",
                 )
                 pipe = WanPipeline.from_pretrained(
                     self.cfg.model_id,
                     vae=vae,
                     torch_dtype=torch.bfloat16,
+                    device_map="auto",
                 )
                 # flow_shift: 3.0 for 480P, 5.0 for 720P
                 pipe.scheduler = UniPCMultistepScheduler.from_config(
                     pipe.scheduler.config,
                     flow_shift=3.0,
                 )
-                if self.cfg.use_cpu_offload:
-                    pipe.enable_model_cpu_offload()
-                else:
-                    pipe.to(self.cfg.device)
+                # device_map="auto" already handles placement — no manual offload
                 self._pipeline = pipe
             except Exception as exc:
                 raise VideoGenerationError(
