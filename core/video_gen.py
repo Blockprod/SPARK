@@ -257,6 +257,12 @@ class VideoGenerator:
                 )
                 frames = result.frames[0]
             except Exception as exc:
+                # If inference hit a CUDA error, clear GPU state so the
+                # next scene can attempt inference with a clean context.
+                import gc
+                if torch.cuda.is_available():
+                    gc.collect()
+                    torch.cuda.empty_cache()
                 raise VideoGenerationError(
                     f"Wan2.1 inference failed for scene {scene_id}: {exc}"
                 ) from exc
@@ -299,10 +305,17 @@ class VideoGenerator:
 
         model_id = self.cfg.model_id
         LOGGER.info(
-            "Loading Wan2.1 pipeline: %s (CPU RAM, enable_model_cpu_offload)…",
+            "Loading Wan2.1 pipeline: %s (sequential CPU offload)…",
             model_id,
         )
         try:
+            # Warm up CUDA context so cuBLAS can initialise cleanly before
+            # any model weights touch the GPU.
+            if torch.cuda.is_available():
+                _w = torch.zeros(1, device="cuda")
+                del _w
+                torch.cuda.empty_cache()
+
             # Load all sub-models to CPU RAM in bfloat16.
             # low_cpu_mem_usage=True avoids double-buffering during weight
             # copying, keeping peak CPU RAM ≈ total model size (~25 GB).
@@ -316,10 +329,14 @@ class VideoGenerator:
                 pipe.scheduler.config,
                 flow_shift=3.0,
             )
-            # Register accelerate hooks: each sub-module auto-migrates to GPU
-            # just before its forward pass and back to CPU immediately after.
-            # No manual .to(device) needed or allowed after this call.
-            pipe.enable_model_cpu_offload()
+            # Sequential offload: PyTorch hooks move each individual layer
+            # to GPU just before its forward() call, then back to CPU.
+            # The UMT5-XXL text encoder is 22.7 GB bfloat16 — it cannot fit
+            # on the T4 (14.56 GB) as a whole sub-model, but its individual
+            # layers (~940 MB each) fit easily.  Peak VRAM < 1 GB.
+            # Slower than model_cpu_offload but the only option that avoids
+            # CUBLAS_STATUS_ALLOC_FAILED caused by whole-encoder OOM.
+            pipe.enable_sequential_cpu_offload()
 
         except Exception as exc:
             gc.collect()
@@ -328,7 +345,7 @@ class VideoGenerator:
                 f"Failed to load Wan2.1 pipeline '{model_id}': {exc}"
             ) from exc
 
-        LOGGER.info("Wan2.1 pipeline loaded (model_cpu_offload). Peak VRAM ≈ 2.6 GB.")
+        LOGGER.info("Wan2.1 pipeline loaded (sequential_cpu_offload).")
         self._pipeline = pipe
         return self._pipeline
 
