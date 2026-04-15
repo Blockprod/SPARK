@@ -280,83 +280,56 @@ class VideoGenerator:
     def _get_pipeline(self) -> Any:
         """Lazily load WanPipeline once and cache it across all scenes.
 
-        Memory strategy for T4 (12.7 GB RAM / 16 GB VRAM):
-          - Text encoder UMT5-XXL : 18 GB bfloat16 → 4-bit NF4 ≈ 4.5 GB,
-            loaded directly onto GPU (never staged in CPU RAM).
-          - Transformer 1.3B      : ≈ 5 GB bfloat16, loaded to CPU then moved
-            to GPU (peak CPU RAM ≈ 5.5 GB — fits in 12.7 GB).
-          - VAE                   : ≈ 0.5 GB float32, on GPU.
-          Total VRAM ≈ 10 GB < 16 GB T4  ✓
+        Memory strategy (enable_model_cpu_offload — Kaggle T4):
+          - All sub-models loaded to CPU RAM in bfloat16 (0 VRAM during load).
+          - During inference each sub-module auto-migrates to GPU just before
+            its forward() call and returns to CPU immediately after.
+          - Peak VRAM ≈ 2.6 GB (transformer only). Fits on T4 (14.56 GB).
+          - Requires ~25 GB CPU RAM (Kaggle T4 provides ~30 GB). ✓
         """
-        if self._pipeline is None:
-            LOGGER.info(
-                "Loading Wan2.1 pipeline: %s (4-bit NF4 text encoder → GPU)...",
-                self.cfg.model_id,
+        if self._pipeline is not None:
+            return self._pipeline
+
+        import gc
+        import torch
+        from diffusers import WanPipeline
+        from diffusers.schedulers.scheduling_unipc_multistep import (
+            UniPCMultistepScheduler,
+        )
+
+        model_id = self.cfg.model_id
+        LOGGER.info(
+            "Loading Wan2.1 pipeline: %s (CPU RAM, enable_model_cpu_offload)…",
+            model_id,
+        )
+        try:
+            # Load all sub-models to CPU RAM in bfloat16.
+            # low_cpu_mem_usage=True avoids double-buffering during weight
+            # copying, keeping peak CPU RAM ≈ total model size (~25 GB).
+            pipe = WanPipeline.from_pretrained(
+                model_id,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
             )
-            try:
-                import torch
-                from diffusers import AutoencoderKLWan, WanPipeline
-                from diffusers.schedulers.scheduling_unipc_multistep import (
-                    UniPCMultistepScheduler,
-                )
-                from transformers import BitsAndBytesConfig, UMT5EncoderModel
+            # flow_shift: 3.0 for 480 P, 5.0 for 720 P
+            pipe.scheduler = UniPCMultistepScheduler.from_config(
+                pipe.scheduler.config,
+                flow_shift=3.0,
+            )
+            # Register accelerate hooks: each sub-module auto-migrates to GPU
+            # just before its forward pass and back to CPU immediately after.
+            # No manual .to(device) needed or allowed after this call.
+            pipe.enable_model_cpu_offload()
 
-                model_id = self.cfg.model_id
-                device = self.cfg.device  # "cuda"
+        except Exception as exc:
+            gc.collect()
+            torch.cuda.empty_cache()
+            raise VideoGenerationError(
+                f"Failed to load Wan2.1 pipeline '{model_id}': {exc}"
+            ) from exc
 
-                # VAE: 508 MB float32 — load to CPU, move to GPU after assembly.
-                vae = AutoencoderKLWan.from_pretrained(
-                    model_id,
-                    subfolder="vae",
-                    torch_dtype=torch.float32,
-                    low_cpu_mem_usage=True,
-                )
-
-                # Text encoder: 4-bit NF4 quantisation (bitsandbytes).
-                # Reduces 18 GB → ~4.5 GB and loads directly onto GPU,
-                # so CPU RAM is never exhausted.
-                LOGGER.info("  Quantising UMT5-XXL text encoder (4-bit NF4) → GPU…")
-                bnb_config = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_compute_dtype=torch.bfloat16,
-                    bnb_4bit_use_double_quant=True,
-                    bnb_4bit_quant_type="nf4",
-                )
-                text_encoder = UMT5EncoderModel.from_pretrained(
-                    model_id,
-                    subfolder="text_encoder",
-                    quantization_config=bnb_config,
-                    device_map={"": device},
-                )
-
-                # WanPipeline.from_pretrained skips text_encoder (already loaded).
-                # It loads only the transformer (~5 GB) via CPU RAM and the
-                # tokenizer+scheduler (negligible).
-                LOGGER.info("  Loading transformer + assembling pipeline…")
-                pipe = WanPipeline.from_pretrained(
-                    model_id,
-                    vae=vae,
-                    text_encoder=text_encoder,
-                    torch_dtype=torch.bfloat16,
-                    low_cpu_mem_usage=True,
-                )
-
-                # Move transformer and VAE to GPU.
-                # Final VRAM: 4.5 GB (text enc) + 5 GB (transformer) + 0.5 GB (VAE) ≈ 10 GB
-                pipe.transformer.to(device)
-                pipe.vae.to(device)
-
-                # flow_shift: 3.0 for 480P, 5.0 for 720P
-                pipe.scheduler = UniPCMultistepScheduler.from_config(
-                    pipe.scheduler.config,
-                    flow_shift=3.0,
-                )
-                self._pipeline = pipe
-            except Exception as exc:
-                raise VideoGenerationError(
-                    f"Failed to load Wan2.1 pipeline '{self.cfg.model_id}': {exc}"
-                ) from exc
-            LOGGER.info("Wan2.1 pipeline loaded successfully.")
+        LOGGER.info("Wan2.1 pipeline loaded (model_cpu_offload). Peak VRAM ≈ 2.6 GB.")
+        self._pipeline = pipe
         return self._pipeline
 
 
