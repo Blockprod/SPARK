@@ -30,9 +30,9 @@ pipeline:
   max_duration_sec: 60
   max_scenes: 8
   target_aspect_ratio: "9:16"
-  target_width: 576
-  target_height: 1024
-  target_fps: 25
+  target_width: 480
+  target_height: 832
+  target_fps: 16
 
   # Concurrency guard: maximum simultaneous pipeline runs (avoids GPU OOM)
   max_concurrent_runs: 1
@@ -90,23 +90,21 @@ script_generation:
   include_cta: true
 
 video_generation:
-  provider: ltx-2
-  # Model paths — set by Colab cell 3b (HF download) and cell 5 (verify)
-  checkpoint_path: /content/models/ltx2/ltx-2.3-22b-distilled-1.1.safetensors
-  spatial_upsampler_path: /content/models/ltx2/ltx-2.3-spatial-upscaler-x2-1.1.safetensors
-  gemma_root: /content/models/ltx2/gemma-3-12b-it-qat-q4_0-unquantized
+  provider: wan
+  # Wan2.1 1.3B — downloaded automatically by Diffusers on first run (~8 Go, ~5 min)
+  # Compatible T4 Colab gratuit (16 Go VRAM) — aucun A100 requis
+  model_id: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
   device: cuda
-  fp8: true   # FP8-cast quantization — required for A100-40GB (22B model)
+  num_frames: 81        # 4*20+1 = ~5 sec a 16 fps
+  num_inference_steps: 25
+  guidance_scale: 5.0
+  use_cpu_offload: false  # T4 a 16 Go, modele ~8 Go — .to(cuda) direct est plus rapide
 
   generation:
     seed: -1  # -1 = seed deterministe par run_id
 
   scenes:
-    max_scene_duration_sec: 10
-
-  coherence:
-    enable_image_conditioning: true
-    conditioning_strength: 0.6
+    max_scene_duration_sec: 5
 
 audio_generation:
   active_backend: edge_tts   # edge_tts (recommended) or kokoro

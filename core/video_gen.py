@@ -1,15 +1,12 @@
 # -*- coding: utf-8 -*-
-"""LTX-2.3 video clip generation via official ltx-pipelines.
+"""Wan2.1 1.3B text-to-video generation via HuggingFace Diffusers.
 
-Each scene from the script package is rendered independently using the
-DistilledPipeline (8+4 steps two-stage pipeline with 2x spatial upscaling).
-Visual coherence between scenes is maintained via image conditioning:
-the last frame of scene N seeds scene N+1.
+Each scene from the script package is rendered independently using WanPipeline
+(T2V-1.3B). The model requires ~8.2 GB VRAM — compatible with T4 (Colab free
+tier, 16 GB VRAM) and any A-series GPU.
 
-Required models (downloaded by Colab cell 5a):
-  - ltx-2.3-22b-distilled-1.1.safetensors  (22B DiT checkpoint)
-  - ltx-2.3-spatial-upscaler-x2-1.1.safetensors
-  - google/gemma-3-12b-it-qat-q4_0-unquantized  (text encoder)
+The model is downloaded automatically by Diffusers on first run (~8 GB, ~5 min
+on Colab's fast network), and cached at /root/.cache/huggingface/.
 """
 
 from __future__ import annotations
@@ -17,18 +14,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
-from PIL import Image
 
 LOGGER = logging.getLogger(__name__)
 
-# Required for FP8 quantization memory management on CUDA
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 
@@ -40,25 +34,32 @@ class VideoGenerationError(RuntimeError):
 # Configuration
 # ---------------------------------------------------------------------------
 
+_DEFAULT_NEGATIVE_PROMPT = (
+    "Bright tones, overexposed, static, blurred details, subtitles, "
+    "style, works, paintings, images, static, overall gray, worst quality, "
+    "low quality, JPEG compression residue, ugly, incomplete, deformed, "
+    "disfigured, misshapen limbs, fused fingers, still picture, "
+    "messy background, walking backwards"
+)
+
 
 @dataclass(slots=True)
 class VideoGenConfig:
     """All parameters needed by :class:`VideoGenerator`."""
 
-    checkpoint_path: str
-    spatial_upsampler_path: str
-    gemma_root: str
+    model_id: str
     device: str
-    fp8: bool
-    seed: int
+    height: int
+    width: int
+    num_frames: int
+    num_inference_steps: int
+    guidance_scale: float
     fps: float
-    width: int       # final output width  (after 2x spatial upscale)
-    height: int      # final output height (after 2x spatial upscale)
-    max_scene_duration_sec: int
-    enable_image_conditioning: bool
-    conditioning_strength: float
+    seed: int
     clips_dir: Path
-    use_static_fallback: bool = False
+    use_cpu_offload: bool
+    max_scene_duration_sec: int
+    negative_prompt: str
 
     @classmethod
     def from_mapping(cls, config: dict[str, Any]) -> "VideoGenConfig":
@@ -74,32 +75,25 @@ class VideoGenConfig:
             raise VideoGenerationError("Missing 'pipeline' in configuration.")
 
         gen_cfg = video_cfg.get("generation", {})
-        coherence_cfg = video_cfg.get("coherence", {})
+        scenes_cfg = video_cfg.get("scenes", {})
         clips_dir = Path(str(paths_cfg.get("clips_dir", "./outputs/clips"))).resolve()
 
         return cls(
-            checkpoint_path=str(video_cfg.get("checkpoint_path", "")),
-            spatial_upsampler_path=str(video_cfg.get("spatial_upsampler_path", "")),
-            gemma_root=str(video_cfg.get("gemma_root", "")),
+            model_id=str(video_cfg.get("model_id", "Wan-AI/Wan2.1-T2V-1.3B-Diffusers")),
             device=str(video_cfg.get("device", "cuda")),
-            fp8=bool(video_cfg.get("fp8", True)),
+            height=int(pipeline_cfg.get("target_height", 832)),
+            width=int(pipeline_cfg.get("target_width", 480)),
+            num_frames=int(video_cfg.get("num_frames", 81)),
+            num_inference_steps=int(video_cfg.get("num_inference_steps", 25)),
+            guidance_scale=float(video_cfg.get("guidance_scale", 5.0)),
+            fps=float(pipeline_cfg.get("target_fps", 16)),
             seed=int(gen_cfg.get("seed", -1)),
-            fps=float(pipeline_cfg.get("target_fps", 25)),
-            width=int(pipeline_cfg.get("target_width", 576)),
-            height=int(pipeline_cfg.get("target_height", 1024)),
-            max_scene_duration_sec=int(
-                video_cfg.get("scenes", {}).get("max_scene_duration_sec", 10)
-            ),
-            enable_image_conditioning=bool(
-                coherence_cfg.get("enable_image_conditioning", True)
-            ),
-            conditioning_strength=float(
-                coherence_cfg.get("conditioning_strength", 0.6)
-            ),
             clips_dir=clips_dir,
-            use_static_fallback=str(
-                video_cfg.get("provider", "ltx-2")
-            ).lower() == "static",
+            use_cpu_offload=bool(video_cfg.get("use_cpu_offload", True)),
+            max_scene_duration_sec=int(scenes_cfg.get("max_scene_duration_sec", 5)),
+            negative_prompt=str(
+                video_cfg.get("negative_prompt", _DEFAULT_NEGATIVE_PROMPT)
+            ),
         )
 
 
@@ -109,7 +103,7 @@ class VideoGenConfig:
 
 
 class VideoGenerator:
-    """LTX-2.3 DistilledPipeline wrapper with inter-scene conditioning."""
+    """Wan2.1 1.3B WanPipeline wrapper for per-scene video generation."""
 
     def __init__(self, cfg: VideoGenConfig) -> None:
         self.cfg = cfg
@@ -136,62 +130,40 @@ class VideoGenerator:
 
         clip_paths: list[Path] = []
         degraded_scenes: list[int] = []
-        last_frame_path: str | None = None
 
         for scene in scenes:
             scene_id = int(scene.get("scene_id", len(clip_paths) + 1))
             output_path = self.cfg.clips_dir / f"{run_id}_scene{scene_id:02d}.mp4"
 
-            use_cond = (
-                last_frame_path is not None
-                and self.cfg.enable_image_conditioning
-            )
-            LOGGER.info(
-                "Generating scene %d/%d (conditioning=%s)",
-                scene_id, len(scenes), use_cond,
-            )
+            LOGGER.info("Generating scene %d/%d", scene_id, len(scenes))
 
-            if self.cfg.use_static_fallback:
-                clip_path = await asyncio.to_thread(
-                    _generate_static_fallback,
-                    None, output_path,
-                    int(scene.get("duration_sec", 8)),
-                    int(self.cfg.fps), self.cfg.width, self.cfg.height,
+            try:
+                clip_path = await self._render_scene(
+                    scene=scene,
+                    output_path=output_path,
+                    scene_id=scene_id,
+                    seed=effective_seed,
                 )
+                clip_paths.append(clip_path)
+                LOGGER.info("Scene %d OK -> %s", scene_id, clip_path.name)
+            except Exception as exc:
+                LOGGER.error(
+                    "SCENE %d FAILED [%s: %s] -- using placeholder.",
+                    scene_id, type(exc).__name__, exc,
+                )
+                LOGGER.debug(
+                    "Full traceback for scene %d:", scene_id, exc_info=True
+                )
+                fallback = await asyncio.to_thread(
+                    _generate_static_fallback,
+                    output_path,
+                    int(scene.get("duration_sec", 5)),
+                    int(self.cfg.fps),
+                    self.cfg.width,
+                    self.cfg.height,
+                )
+                clip_paths.append(fallback)
                 degraded_scenes.append(scene_id)
-            else:
-                try:
-                    clip_path = await self._render_scene(
-                        scene=scene,
-                        output_path=output_path,
-                        scene_id=scene_id,
-                        seed=effective_seed,
-                        conditioning_image_path=last_frame_path if use_cond else None,
-                    )
-                except Exception as exc:
-                    # Log full error so user can see the REAL reason in Colab output
-                    LOGGER.error(
-                        "SCENE %d FAILED [%s: %s] -- falling back to black placeholder.",
-                        scene_id, type(exc).__name__, exc,
-                    )
-                    LOGGER.debug("Full traceback for scene %d:", scene_id, exc_info=True)
-                    clip_path = await asyncio.to_thread(
-                        _generate_static_fallback,
-                        None, output_path,
-                        int(scene.get("duration_sec", 8)),
-                        int(self.cfg.fps), self.cfg.width, self.cfg.height,
-                    )
-                    degraded_scenes.append(scene_id)
-
-            clip_paths.append(clip_path)
-
-            # Extract last frame for inter-scene conditioning
-            frame_save = (
-                self.cfg.clips_dir / f"{run_id}_scene{scene_id:02d}_lastframe.png"
-            )
-            last_frame_path = await asyncio.to_thread(
-                _extract_and_save_last_frame, clip_path, frame_save,
-            )
 
             if progress_callback is not None:
                 try:
@@ -200,7 +172,7 @@ class VideoGenerator:
                         {
                             "scene_id": scene_id,
                             "total": len(scenes),
-                            "clip_path": str(clip_path),
+                            "clip_path": str(clip_paths[-1]),
                         },
                     )
                 except Exception as cb_exc:
@@ -208,11 +180,14 @@ class VideoGenerator:
 
         if degraded_scenes:
             LOGGER.warning(
-                "Run '%s': %d/%d scene(s) fell back to black placeholder: %s\n"
-                "If ALL scenes are black: check model paths and LTX-2 package install.",
+                "Run '%s': %d/%d scene(s) used placeholder: %s",
                 run_id, len(degraded_scenes), len(scenes), degraded_scenes,
             )
-        LOGGER.info("Video generation complete: %d clips for run '%s'.", len(clip_paths), run_id)
+
+        LOGGER.info(
+            "Video generation complete: %d clips for run '%s'.",
+            len(clip_paths), run_id,
+        )
         return clip_paths, degraded_scenes
 
     # -- private --
@@ -223,144 +198,125 @@ class VideoGenerator:
         output_path: Path,
         scene_id: int,
         seed: int,
-        conditioning_image_path: str | None = None,
     ) -> Path:
+        """Render a single scene using WanPipeline in a background thread."""
+
         def _run() -> Path:
-            # --- Import LTX-2 packages (lazy; fails fast with useful message) ---
             try:
-                from ltx_core.model.video_vae import TilingConfig, get_video_chunks_number
-                from ltx_pipelines.utils.media_io import encode_video
+                import torch
             except ImportError as exc:
                 raise VideoGenerationError(
-                    f"LTX-2 packages not installed: {exc}. "
-                    "In Colab: pip install -e /content/LTX-2/packages/ltx-core "
-                    "-e /content/LTX-2/packages/ltx-pipelines"
+                    "PyTorch is not installed. Run: pip install torch"
                 ) from exc
 
-            # --- Load pipeline (cached after first call) ---
             try:
                 pipeline = self._get_pipeline()
+            except VideoGenerationError:
+                raise
             except Exception as exc:
                 raise VideoGenerationError(
                     f"Pipeline load failed for scene {scene_id}: {exc}"
                 ) from exc
 
-            prompt = str(scene.get("visual_prompt", "")).strip()
+            prompt = str(
+                scene.get("visual_prompt", scene.get("narration", ""))
+            ).strip()
             if not prompt:
                 raise VideoGenerationError(f"Scene {scene_id}: empty visual_prompt")
 
             duration = min(
-                int(scene.get("duration_sec", 8)),
+                int(scene.get("duration_sec", 5)),
                 self.cfg.max_scene_duration_sec,
             )
             num_frames = _compute_num_frames(duration, self.cfg.fps)
 
-            tiling_config = TilingConfig.default()
-            video_chunks_number = get_video_chunks_number(num_frames, tiling_config)
-
-            # --- Image conditioning for scene-to-scene visual continuity ---
-            images: list = []
-            if conditioning_image_path:
-                try:
-                    # Format: (image_path, start_frame, strength, end_frame)
-                    images = [
-                        (
-                            conditioning_image_path,
-                            0,
-                            float(self.cfg.conditioning_strength),
-                            num_frames - 1,
-                        )
-                    ]
-                    LOGGER.debug(
-                        "Conditioning: %s (strength=%.2f)",
-                        conditioning_image_path, self.cfg.conditioning_strength,
-                    )
-                except Exception as cond_exc:
-                    LOGGER.warning("Image conditioning skipped: %s", cond_exc)
-                    images = []
-
             LOGGER.info(
-                "LTX-2 scene %d: %dx%d | %d frames @%dfps | seed=%d | cond=%s",
-                scene_id, self.cfg.width, self.cfg.height,
-                num_frames, int(self.cfg.fps), seed + scene_id, bool(images),
+                "Scene %d: %dx%d | %d frames @%dfps | seed=%d | prompt=%r",
+                scene_id,
+                self.cfg.width,
+                self.cfg.height,
+                num_frames,
+                int(self.cfg.fps),
+                seed + scene_id,
+                prompt[:80],
             )
 
-            # --- Inference ---
             try:
-                video, ltx_audio = pipeline(
+                generator = torch.Generator(device="cpu").manual_seed(
+                    seed + scene_id
+                )
+                result = pipeline(
                     prompt=prompt,
-                    seed=seed + scene_id,
+                    negative_prompt=self.cfg.negative_prompt,
                     height=self.cfg.height,
                     width=self.cfg.width,
                     num_frames=num_frames,
-                    frame_rate=self.cfg.fps,
-                    images=images,
-                    tiling_config=tiling_config,
+                    num_inference_steps=self.cfg.num_inference_steps,
+                    guidance_scale=self.cfg.guidance_scale,
+                    generator=generator,
                 )
+                frames = result.frames[0]
             except Exception as exc:
                 raise VideoGenerationError(
-                    f"LTX-2 inference failed for scene {scene_id}: {exc}"
+                    f"Wan2.1 inference failed for scene {scene_id}: {exc}"
                 ) from exc
 
-            # --- Encode to MP4 ---
             try:
-                encode_video(
-                    video=video,
-                    fps=int(self.cfg.fps),
-                    audio=ltx_audio,
-                    output_path=str(output_path),
-                    video_chunks_number=video_chunks_number,
-                )
+                _save_frames_to_mp4(frames, output_path, self.cfg.fps)
             except Exception as exc:
                 raise VideoGenerationError(
-                    f"encode_video failed for scene {scene_id}: {exc}"
+                    f"Video encoding failed for scene {scene_id}: {exc}"
                 ) from exc
 
-            if not output_path.exists():
+            if not output_path.exists() or output_path.stat().st_size < 1024:
                 raise VideoGenerationError(
-                    f"LTX-2 did not produce output file: {output_path}"
+                    f"Output file missing or empty after encoding: {output_path}"
                 )
 
-            LOGGER.info("Scene %d OK -> %s", scene_id, output_path.name)
             return output_path
 
         return await asyncio.to_thread(_run)
 
     def _get_pipeline(self) -> Any:
-        """Lazily load the LTX-2 DistilledPipeline (cached for re-use across scenes)."""
+        """Lazily load WanPipeline once and cache it across all scenes."""
         if self._pipeline is None:
-            LOGGER.info("Loading LTX-2.3 DistilledPipeline (fp8=%s)...", self.cfg.fp8)
-
-            # Validate model paths before attempting load
-            for label, path in [
-                ("distilled_checkpoint", self.cfg.checkpoint_path),
-                ("spatial_upsampler", self.cfg.spatial_upsampler_path),
-                ("gemma_root", self.cfg.gemma_root),
-            ]:
-                if not path or not Path(path).exists():
-                    raise VideoGenerationError(
-                        f"LTX-2 {label} not found at: {path!r}. "
-                        "Run Colab cell 5a to download models."
-                    )
-
+            LOGGER.info(
+                "Loading Wan2.1 pipeline: %s (cpu_offload=%s)...",
+                self.cfg.model_id,
+                self.cfg.use_cpu_offload,
+            )
             try:
-                from ltx_pipelines.distilled import DistilledPipeline
-                from ltx_core.quantization import QuantizationPolicy
-
-                quant = QuantizationPolicy.fp8_cast() if self.cfg.fp8 else None
-
-                self._pipeline = DistilledPipeline(
-                    distilled_checkpoint_path=self.cfg.checkpoint_path,
-                    spatial_upsampler_path=self.cfg.spatial_upsampler_path,
-                    gemma_root=self.cfg.gemma_root,
-                    loras=[],
-                    quantization=quant,
+                import torch
+                from diffusers import AutoencoderKLWan, WanPipeline
+                from diffusers.schedulers.scheduling_unipc_multistep import (
+                    UniPCMultistepScheduler,
                 )
+
+                vae = AutoencoderKLWan.from_pretrained(
+                    self.cfg.model_id,
+                    subfolder="vae",
+                    torch_dtype=torch.float32,
+                )
+                pipe = WanPipeline.from_pretrained(
+                    self.cfg.model_id,
+                    vae=vae,
+                    torch_dtype=torch.bfloat16,
+                )
+                # flow_shift: 3.0 for 480P, 5.0 for 720P
+                pipe.scheduler = UniPCMultistepScheduler.from_config(
+                    pipe.scheduler.config,
+                    flow_shift=3.0,
+                )
+                if self.cfg.use_cpu_offload:
+                    pipe.enable_model_cpu_offload()
+                else:
+                    pipe.to(self.cfg.device)
+                self._pipeline = pipe
             except Exception as exc:
                 raise VideoGenerationError(
-                    f"Failed to load LTX-2 DistilledPipeline: {exc}"
+                    f"Failed to load Wan2.1 pipeline '{self.cfg.model_id}': {exc}"
                 ) from exc
-            LOGGER.info("LTX-2.3 DistilledPipeline loaded successfully.")
+            LOGGER.info("Wan2.1 pipeline loaded successfully.")
         return self._pipeline
 
 
@@ -370,87 +326,66 @@ class VideoGenerator:
 
 
 def _compute_num_frames(duration_sec: int, fps: float) -> int:
-    """Compute frame count satisfying the 8k+1 constraint required by LTX-2."""
+    """Frame count satisfying the 4k+1 constraint required by Wan2.1."""
     raw = int(duration_sec * fps)
-    k = round((raw - 1) / 8)
-    adjusted = 8 * k + 1
-    return max(9, adjusted)
+    k = max(1, round((raw - 1) / 4))
+    adjusted = 4 * k + 1
+    # Cap at 129 frames (~8 sec at 16 fps) to stay within T4 VRAM budget
+    return max(17, min(adjusted, 129))
 
 
-def _extract_and_save_last_frame(
-    clip_path: Path, save_path: Path,
-) -> str | None:
-    """Extract last frame from MP4 and save as PNG for next-scene conditioning."""
-    cap = cv2.VideoCapture(str(clip_path))
-    if not cap.isOpened():
-        LOGGER.warning("Cannot open clip for frame extraction: %s", clip_path)
-        return None
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, total - 1))
-    ret, frame_bgr = cap.read()
-    cap.release()
-    if not ret:
-        LOGGER.warning("Cannot read last frame from: %s", clip_path)
-        return None
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(save_path), frame_bgr)
-    return str(save_path)
+def _save_frames_to_mp4(
+    frames: list,
+    output_path: Path,
+    fps: float,
+) -> None:
+    """Write a list of PIL images (or numpy arrays) to an MP4 file via OpenCV."""
+    if not frames:
+        raise VideoGenerationError("No frames to save.")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    first = frames[0]
+    if hasattr(first, "size"):       # PIL Image: .size = (width, height)
+        w, h = first.size
+    else:
+        arr = np.array(first)
+        h, w = arr.shape[:2]
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (w, h))
+    if not writer.isOpened():
+        raise VideoGenerationError(
+            f"cv2.VideoWriter failed to open: {output_path}"
+        )
+
+    for frame in frames:
+        if hasattr(frame, "size"):
+            arr = np.array(frame)
+        else:
+            arr = frame
+        if arr.dtype != np.uint8:
+            arr = (arr * 255).clip(0, 255).astype(np.uint8)
+        bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+        writer.write(bgr)
+
+    writer.release()
 
 
 def _generate_static_fallback(
-    reference_image: Image.Image | None,
     output_path: Path,
     duration_sec: int,
     fps: int,
     width: int,
     height: int,
 ) -> Path:
-    """Generate a static fallback MP4 (solid black or reference frame)."""
+    """Generate a solid dark-grey fallback clip when inference fails."""
     num_frames = max(1, duration_sec * fps)
-
-    if reference_image is not None:
-        try:
-            frame = reference_image.resize((width, height)).convert("RGB")
-            frame_array = np.array(frame, dtype=np.uint8)
-        except Exception:
-            frame_array = np.zeros((height, width, 3), dtype=np.uint8)
-    else:
-        frame_array = np.zeros((height, width, 3), dtype=np.uint8)
-
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(output_path), fourcc, float(fps), (width, height))
-    if not writer.isOpened():
-        raise VideoGenerationError(
-            f"Could not open VideoWriter for fallback clip: {output_path}"
-        )
-    try:
-        frame_bgr = cv2.cvtColor(frame_array, cv2.COLOR_RGB2BGR)
-        for _ in range(num_frames):
-            writer.write(frame_bgr)
-    finally:
-        writer.release()
+    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+    frame = np.full((height, width, 3), 30, dtype=np.uint8)
+    for _ in range(num_frames):
+        writer.write(frame)
+    writer.release()
     return output_path
-
-
-def _sanitize_run_id(run_id: str) -> str:
-    return re.sub(r"[^\w\-]", "_", run_id)[:64]
-
-
-# ---------------------------------------------------------------------------
-# Public API  (called by pipeline.py)
-# ---------------------------------------------------------------------------
-
-
-async def generate_video_clips(
-    config: dict[str, Any],
-    scenes: list[dict[str, Any]],
-    run_id: str,
-    progress_callback: Any | None = None,
-) -> tuple[list[Path], list[int]]:
-    """Public async entry point for video clip generation."""
-    cfg = VideoGenConfig.from_mapping(config)
-    generator = VideoGenerator(cfg=cfg)
-    return await generator.generate_clips(
-        scenes=scenes, run_id=run_id, progress_callback=progress_callback,
-    )

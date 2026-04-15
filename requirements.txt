@@ -15,9 +15,12 @@ tenacity==9.0.0
 # LLM script generation (Gemini)
 google-genai>=1.0.0
 
-# Video generation stack (LTX-2.3 — 22B native pipeline)
-# ltx-core and ltx-pipelines are installed from the LTX-2 repo (pip install -e)
-# NOT from PyPI — see colab_runner.ipynb cell 2
+# Video generation stack (Wan2.1 1.3B via HuggingFace Diffusers — T4 compatible)
+# ~8 Go VRAM, downloaded automatically on first run (~8 Go model, ~5 min on Colab)
+diffusers>=0.30.0
+transformers>=4.44.0
+accelerate>=0.33.0
+ftfy>=6.1.3
 torch==2.5.1
 torchvision==0.20.1
 torchaudio==2.5.1
