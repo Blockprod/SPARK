@@ -98,7 +98,7 @@ video_generation:
   num_frames: 81        # 4*20+1 = ~5 sec a 16 fps
   num_inference_steps: 25
   guidance_scale: 5.0
-  use_cpu_offload: false  # T4 a 16 Go, modele ~8 Go — .to(cuda) direct est plus rapide
+  use_cpu_offload: true   # requis pour T4 (16 Go) — text encoder UMT5-XXL ~10 Go
 
   generation:
     seed: -1  # -1 = seed deterministe par run_id
