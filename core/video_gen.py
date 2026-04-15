@@ -389,3 +389,24 @@ def _generate_static_fallback(
         writer.write(frame)
     writer.release()
     return output_path
+
+
+# ---------------------------------------------------------------------------
+# Public module-level entry point (called by pipeline.py)
+# ---------------------------------------------------------------------------
+
+
+async def generate_video_clips(
+    config: dict[str, Any],
+    scenes: list[dict[str, Any]],
+    run_id: str,
+    progress_callback: Any | None = None,
+) -> tuple[list[Path], list[int]]:
+    """Module-level wrapper expected by pipeline.py _stage_video."""
+    cfg = VideoGenConfig.from_mapping(config)
+    generator = VideoGenerator(cfg)
+    return await generator.generate_clips(
+        scenes=scenes,
+        run_id=run_id,
+        progress_callback=progress_callback,
+    )
