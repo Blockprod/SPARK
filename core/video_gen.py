@@ -278,12 +278,20 @@ class VideoGenerator:
         return await asyncio.to_thread(_run)
 
     def _get_pipeline(self) -> Any:
-        """Lazily load WanPipeline once and cache it across all scenes."""
+        """Lazily load WanPipeline once and cache it across all scenes.
+
+        Memory strategy for T4 (12.7 GB RAM / 16 GB VRAM):
+          - Text encoder UMT5-XXL : 18 GB bfloat16 → 4-bit NF4 ≈ 4.5 GB,
+            loaded directly onto GPU (never staged in CPU RAM).
+          - Transformer 1.3B      : ≈ 5 GB bfloat16, loaded to CPU then moved
+            to GPU (peak CPU RAM ≈ 5.5 GB — fits in 12.7 GB).
+          - VAE                   : ≈ 0.5 GB float32, on GPU.
+          Total VRAM ≈ 10 GB < 16 GB T4  ✓
+        """
         if self._pipeline is None:
             LOGGER.info(
-                "Loading Wan2.1 pipeline: %s (cpu_offload=%s)...",
+                "Loading Wan2.1 pipeline: %s (4-bit NF4 text encoder → GPU)...",
                 self.cfg.model_id,
-                self.cfg.use_cpu_offload,
             )
             try:
                 import torch
@@ -291,29 +299,58 @@ class VideoGenerator:
                 from diffusers.schedulers.scheduling_unipc_multistep import (
                     UniPCMultistepScheduler,
                 )
+                from transformers import BitsAndBytesConfig, UMT5EncoderModel
 
-                # device_map="auto" loads weights shard-by-shard directly
-                # onto GPU/CPU without staging everything in CPU RAM first.
-                # This avoids OOM on T4 (12.7 GB RAM, 16 GB VRAM) when the
-                # UMT5-XXL text encoder alone is ~18 GB.
+                model_id = self.cfg.model_id
+                device = self.cfg.device  # "cuda"
+
+                # VAE: 508 MB float32 — load to CPU, move to GPU after assembly.
                 vae = AutoencoderKLWan.from_pretrained(
-                    self.cfg.model_id,
+                    model_id,
                     subfolder="vae",
                     torch_dtype=torch.float32,
-                    device_map="auto",
+                    low_cpu_mem_usage=True,
                 )
+
+                # Text encoder: 4-bit NF4 quantisation (bitsandbytes).
+                # Reduces 18 GB → ~4.5 GB and loads directly onto GPU,
+                # so CPU RAM is never exhausted.
+                LOGGER.info("  Quantising UMT5-XXL text encoder (4-bit NF4) → GPU…")
+                bnb_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.bfloat16,
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_quant_type="nf4",
+                )
+                text_encoder = UMT5EncoderModel.from_pretrained(
+                    model_id,
+                    subfolder="text_encoder",
+                    quantization_config=bnb_config,
+                    device_map={"": device},
+                )
+
+                # WanPipeline.from_pretrained skips text_encoder (already loaded).
+                # It loads only the transformer (~5 GB) via CPU RAM and the
+                # tokenizer+scheduler (negligible).
+                LOGGER.info("  Loading transformer + assembling pipeline…")
                 pipe = WanPipeline.from_pretrained(
-                    self.cfg.model_id,
+                    model_id,
                     vae=vae,
+                    text_encoder=text_encoder,
                     torch_dtype=torch.bfloat16,
-                    device_map="auto",
+                    low_cpu_mem_usage=True,
                 )
+
+                # Move transformer and VAE to GPU.
+                # Final VRAM: 4.5 GB (text enc) + 5 GB (transformer) + 0.5 GB (VAE) ≈ 10 GB
+                pipe.transformer.to(device)
+                pipe.vae.to(device)
+
                 # flow_shift: 3.0 for 480P, 5.0 for 720P
                 pipe.scheduler = UniPCMultistepScheduler.from_config(
                     pipe.scheduler.config,
                     flow_shift=3.0,
                 )
-                # device_map="auto" already handles placement — no manual offload
                 self._pipeline = pipe
             except Exception as exc:
                 raise VideoGenerationError(
