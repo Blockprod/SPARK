@@ -27,7 +27,7 @@ Automated short-form video production pipeline (local GPU · Python · YouTube/T
 
 ## Overview
 
-SPARK takes a trending topic, generates a 50–60 s French narration script with Gemini 2.0 Flash, renders matching cinematic clips via LTX-Video-2.3 on a local GPU, synthesizes the voice with Kokoro ONNX or Voxtral (Mistral TTS API), assembles the final 1080×1920 Short with FFmpeg, and uploads it to YouTube — entirely unattended.
+SPARK takes a trending topic, generates a 50–60 s French narration script with Gemini 2.5 Flash, renders matching cinematic clips via Wan2.1-T2V-1.3B (HuggingFace Diffusers) on a local or cloud GPU, synthesizes the voice with Edge TTS (Microsoft Neural TTS, default) or Kokoro ONNX (local fallback), assembles the final 1080×1920 Short with FFmpeg, and uploads it to YouTube — entirely unattended.
 
 Each run produces a JSON manifest (`logs/run_{id}_manifest.json`) with every artefact path, timing, and metadata for auditing.
 
@@ -40,8 +40,8 @@ SPARK/
 ├── core/
 │   ├── trend_hunter.py     — Google Trends (SerpAPI / pytrends fallback) + Reddit scoring
 │   ├── script_gen.py       — Gemini 2.0 Flash narration script + JSON schema validation
-│   ├── video_gen.py        — LTX-Video-2.3 local GPU clip rendering, static fallback
-│   ├── audio_gen.py        — Kokoro ONNX TTS + Voxtral (Mistral API) with retry
+│   ├── video_gen.py        — Wan2.1-T2V-1.3B clip rendering (HuggingFace Diffusers), static fallback
+│   ├── audio_gen.py        — Edge TTS (default) + Kokoro ONNX (local fallback), with retry
 │   ├── post_prod.py        — FFmpeg assembly: clips + narration + subtitles
 │   ├── thumbnail_gen.py    — Frame extraction + Gemini Vision overlay
 │   ├── uploader.py         — YouTube Data API v3 (OAuth2 Fernet)
@@ -72,7 +72,7 @@ SPARK/
 |-----------|---------|-------|
 | Python | 3.11+ | |
 | FFmpeg | 6+ | Must be in PATH or set `ffmpeg_bin` in config.yaml |
-| NVIDIA GPU | ≥ 16 GB VRAM | LTX-Video-2.3 (float16). CPU fallback possible but very slow. |
+| NVIDIA GPU | ≥ 8 GB VRAM | Wan2.1-T2V-1.3B (float16). T4 (Colab free tier) fully supported. CPU fallback very slow. |
 | CUDA | 12.x | |
 | PyTorch | 2.3+ | With CUDA 12 wheels |
 
@@ -95,8 +95,8 @@ python -m venv .venv
 pip install -r requirements.txt
 
 # 4. Download model files (one-time)
-# LTX-Video-2.3 — requires GPU and ~12 GB disk
-python -c "from huggingface_hub import snapshot_download; snapshot_download('Lightricks/LTX-Video-2.3')"
+# Wan2.1-T2V-1.3B — downloaded automatically on first run (~8 GB), or pre-download:
+python -c "from huggingface_hub import snapshot_download; snapshot_download('Wan-AI/Wan2.1-T2V-1.3B-Diffusers')"
 
 # Kokoro TTS (82M ONNX) — ~330 MB
 python -c "from huggingface_hub import hf_hub_download; hf_hub_download('hexgrad/Kokoro-82M', 'kokoro-v1.0.fp16.onnx', local_dir='models'); hf_hub_download('hexgrad/Kokoro-82M', 'voices-v1.0.bin', local_dir='models')"
@@ -134,7 +134,7 @@ All pipeline behaviour is controlled by two files:
 
 | Variable | Description |
 |----------|-------------|
-| `MISTRAL_API_KEY` | Enables Voxtral TTS (higher voice quality). Set `active_backend: voxtral` in config.yaml. |
+| `MISTRAL_API_KEY` | Optional — reserved for future Voxtral TTS integration. Not required for Edge TTS or Kokoro. |
 | `SERPAPI_KEY` | Official Google Trends API. Replaces pytrends scraping when set. Recommended for production. Plan gratuit : 100 req/mois → https://serpapi.com |
 | `REDDIT_CLIENT_ID` + `REDDIT_CLIENT_SECRET` | Reddit OAuth2 for topic discovery |
 | `REDDIT_USER_AGENT` | Reddit API user-agent string |
@@ -152,12 +152,13 @@ All pipeline behaviour is controlled by two files:
 - `global_timeout_sec` — Hard timeout for a full run (default 7200 s / 2 h)
 
 #### `script_generation`
-- `model` — Gemini model (default `gemini-2.0-flash`)
+- `model` — Gemini model (default `gemini-2.5-flash`)
 - `template_pool` — Narrative templates rotated per run. After 14+ runs, the template with the best `avg_view_percentage` is automatically preferred.
 
 #### `audio_generation`
-- `active_backend` — `kokoro` (local, default) or `voxtral` (Mistral API, higher quality)
-- `voxtral.model` — Mistral TTS model identifier
+- `active_backend` — `edge_tts` (default, free, no GPU) or `kokoro` (local ONNX fallback)
+- `edge_tts.voice` — Microsoft Neural TTS voice (default `fr-FR-DeniseNeural`)
+- `edge_tts.rate` — Speech rate adjustment (default `-5%` for clearer articulation)
 
 #### `platforms`
 - `youtube.enabled` — primary upload (default `true`)
@@ -324,7 +325,7 @@ No manual action required. Verify compliance by checking the "Content disclosure
 |-------|--------|-----------------|
 | 1. Trend discovery | `trend_hunter.py` | 5–30 s |
 | 2. Script generation | `script_gen.py` (Gemini) | 10–30 s |
-| 3. Video generation | `video_gen.py` (LTX-Video-2.3) | 10–40 min (GPU) |
+| 3. Video generation | `video_gen.py` (Wan2.1-T2V-1.3B) | 5–20 min (GPU, T4+) |
 | 4. Audio synthesis | `audio_gen.py` (Kokoro / Voxtral) | 5–30 s |
 | 5. Post-production | `post_prod.py` (FFmpeg) | 30–90 s |
 | 6. Upload | `uploader.py` + platforms | 30–120 s |
@@ -372,7 +373,7 @@ Key fields:
 | Limit | Value | Workaround |
 |-------|-------|------------|
 | YouTube Data API quota | 10 000 units/day | 1 upload ≈ 1600 units → max ~6 uploads/day on free tier |
-| LTX-Video-2.3 VRAM | ≥ 16 GB required | Static fallback activates automatically on OOM |
+| Wan2.1-T2V-1.3B VRAM | ≥ 8 GB required (T4+) | Static fallback activates automatically on OOM |
 | Voxtral (Mistral) rate limit | 429 → 4 retries with exp backoff | Automatic — no action needed |
 | SerpAPI free plan | 100 queries/month | Paid plans start at $50/month (5000 queries) |
 | pytrends (fallback) | Unofficial — may return 404 or 429 | Set `SERPAPI_KEY` to switch to official API |
@@ -393,7 +394,7 @@ If it persists, relax `min_duration_sec` / `max_duration_sec` in `config.yaml`.
 
 ### `VideoGenerationError: CUDA out of memory`
 GPU VRAM exhausted. The scene is automatically replaced with a static fallback frame.
-To avoid this: reduce `max_scenes` in `config.yaml`, or lower `num_inference_steps` in `video_generation.generation`.
+To avoid this: reduce `max_scenes` in `config.yaml`, or lower `num_inference_steps` in `video_generation`, or enable `use_cpu_offload: true`.
 
 ### `AnalyticsError: OAuth2 token file not found`
 Run an upload first to generate the token: `python pipeline.py --upload`
@@ -438,6 +439,6 @@ Private — all rights reserved.
 | Model | License | Commercial use | Attribution required |
 |-------|---------|----------------|---------------------|
 | Kokoro-82M (hexgrad) | Apache 2.0 | ✅ Free | No |
-| LTX-Video v0.9.6+ (Lightricks) | LTXV Open Weights License 0.X | ✅ Free for orgs < $10M/yr | No — but AI disclosure is **mandatory** (already automated) |
+| Wan2.1-T2V-1.3B (Wan-AI) | Apache 2.0 | ✅ Free | No |
 
 Full audit: [tasks/audits/methode/audit_licences_models_2026-04-11.md](tasks/audits/methode/audit_licences_models_2026-04-11.md)
