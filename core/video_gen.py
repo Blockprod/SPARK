@@ -195,9 +195,10 @@ class VideoGenerator:
 
             # Free GPU memory between scenes to avoid OOM accumulation
             import gc as _gc
+            import torch as _torch_gc
             _gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            if _torch_gc.cuda.is_available():
+                _torch_gc.cuda.empty_cache()
 
             if progress_callback is not None:
                 try:
