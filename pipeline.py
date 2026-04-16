@@ -1,11 +1,11 @@
-"""Async end-to-end pipeline orchestrator for shorts-engine.
+"""Async end-to-end pipeline orchestrator for KORU.
 
 Usage (standalone):
-    python pipeline.py --topic "Algorithmes de recommandation" --upload
+    python pipeline.py --episode 1 --act creation --revelation "..." --upload
 
 Usage (from scheduler or dashboard):
     from pipeline import run_pipeline
-    result = await run_pipeline(config, env, topic="...", upload=False)
+    result = await run_pipeline(config, env, episode={"episode_number": 1, "act": "creation", ...}, upload=False)
 """
 
 from __future__ import annotations
@@ -165,8 +165,8 @@ def _write_pending_analytics(
     config: dict[str, Any],
     run_id: str,
     video_id: str,
-    template_used: str,
-    topic: str,
+    episode_number: int,
+    act: str,
     profile: str = "default",
     backend_used: str = "kokoro",
 ) -> None:
@@ -179,8 +179,8 @@ def _write_pending_analytics(
     entry = {
         "run_id": run_id,
         "youtube_video_id": video_id,
-        "template_used": template_used,
-        "topic": topic,
+        "episode_number": episode_number,
+        "act": act,
         "profile": profile or "default",
         "backend_used": backend_used or "kokoro",
         "fetch_after": fetch_after,
@@ -246,8 +246,8 @@ async def _process_pending_analytics(config: dict[str, Any], env: dict[str, str]
             perf_entry: dict[str, Any] = {
                 "run_id": entry.get("run_id", ""),
                 "youtube_video_id": video_id,
-                "template_used": entry.get("template_used", ""),
-                "topic": entry.get("topic", ""),
+                "episode_number": entry.get("episode_number", 0),
+                "act": entry.get("act", ""),
                 "profile": entry.get("profile", "default"),
                 "backend_used": entry.get("backend_used", "kokoro"),
                 "avg_view_percentage": metrics.get("avg_view_percentage", 0.0),
@@ -279,53 +279,30 @@ async def _process_pending_analytics(config: dict[str, Any], env: dict[str, str]
 # ---------------------------------------------------------------------------
 
 
-async def _stage_trends(
-    config: dict[str, Any],
-    env: dict[str, str],
-    run_ctx: dict[str, Any],
-) -> list[dict[str, Any]]:
-    from core.trend_hunter import get_ranked_topics
-
-    LOGGER.info("[trends] Fetching ranked topics…")
-    try:
-        topics = await get_ranked_topics(config=config, env=env, limit=20)
-    except Exception as exc:
-        raise PipelineError(f"Trend discovery failed: {exc}") from exc
-    run_ctx["topics_fetched"] = len(topics)
-    LOGGER.info("[trends] %d topics ranked.", len(topics))
-    return topics
-
-
 async def _stage_script(
     config: dict[str, Any],
     env: dict[str, str],
-    topic: str,
-    trend_context: dict[str, Any],
+    episode: dict[str, Any],
     run_ctx: dict[str, Any],
-    performance_data: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     from core.script_gen import generate_script_package
 
-    LOGGER.info("[script] Generating script for topic: %s", topic)
+    LOGGER.info("[script] Generating script for episode #%d (act: %s)…", episode.get("episode_number", 0), episode.get("act", ""))
     try:
         payload = await generate_script_package(
             config=config,
             env=env,
-            topic=topic,
-            trend_context=trend_context,
-            performance_data=performance_data,
+            episode=episode,
         )
     except Exception as exc:
         raise PipelineError(f"Script generation failed: {exc}") from exc
     run_ctx["scenes"] = len(payload.get("scenes", []))
     run_ctx["duration_sec"] = payload.get("duration_sec", 0)
-    run_ctx["template_used"] = payload.get("template_used", "unknown")
     run_ctx["script_payload"] = payload
     LOGGER.info(
-        "[script] Script ready: %d scenes, %ds (template: %s).",
+        "[script] Script ready: %d scenes, %ds.",
         run_ctx["scenes"],
         run_ctx["duration_sec"],
-        run_ctx["template_used"],
     )
     return payload
 
@@ -498,6 +475,52 @@ async def _stage_thumbnail(
 
 
 # ---------------------------------------------------------------------------
+# Episode auto-increment
+# ---------------------------------------------------------------------------
+
+
+def _next_episode(config: dict[str, Any]) -> dict[str, Any]:
+    """Compute the next episode dict from publish history."""
+    acts = config.get("script_generation", {}).get("acts", ["creation", "apogee", "chute", "ruines"])
+    episode_start = int(config.get("script_generation", {}).get("episode_start", 1))
+
+    logs_dir = _get_logs_dir(config)
+    history_path = logs_dir / "publish_history.jsonl"
+
+    last_episode_number = 0
+    last_act_index = -1
+
+    if history_path.exists():
+        try:
+            with history_path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        ep_num = entry.get("episode_number", 0)
+                        if isinstance(ep_num, int) and ep_num > last_episode_number:
+                            last_episode_number = ep_num
+                            last_act = entry.get("act", "")
+                            if last_act in acts:
+                                last_act_index = acts.index(last_act)
+                    except json.JSONDecodeError:
+                        continue
+        except Exception as exc:
+            LOGGER.warning("Could not read publish_history.jsonl: %s", exc)
+
+    next_episode_number = max(last_episode_number + 1, episode_start)
+    next_act_index = (last_act_index + 1) % len(acts)
+    return {
+        "episode_number": next_episode_number,
+        "act": acts[next_act_index],
+        "revelation": "",
+        "implied_parallel": "",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Main orchestrator
 # ---------------------------------------------------------------------------
 
@@ -505,29 +528,29 @@ async def _stage_thumbnail(
 async def run_pipeline(
     config: dict[str, Any],
     env: dict[str, str],
-    topic: str | None = None,
+    episode: dict[str, Any] | None = None,
     upload: bool = False,
     publish_at: datetime | None = None,
     run_id: str | None = None,
     progress_callback: Any | None = None,
     profile: str | None = None,
 ) -> dict[str, Any]:
-    """Execute the full shorts-engine pipeline end-to-end.
+    """Execute the full KORU pipeline end-to-end.
 
     Args:
         config: Parsed config.yaml mapping. When *profile* is provided, the
             profile overrides are merged in automatically.
         env: Environment mapping with all credentials.
-        topic: Pre-selected topic string. When None, the top trending topic is used.
+        episode: Episode dict with keys ``episode_number``, ``act``,
+            ``revelation``, ``implied_parallel``. When None, auto-computed
+            from publish history via :func:`_next_episode`.
         upload: Whether to upload the final video to YouTube.
         publish_at: UTC datetime for scheduled YouTube publication.
         run_id: Optional run identifier (UUID generated if not provided).
         progress_callback: Optional async callable(stage: str, data: dict) for
                            real-time SSE progress reporting from the dashboard.
-        profile: Optional niche profile name (e.g. ``"ia_histoire"``).  When set,
-            ``profiles/{profile}.yaml`` is deep-merged over *config* and outputs/
-            logs directories are automatically scoped to prevent cross-niche
-            collisions.
+        profile: Optional profile name (e.g. ``"koru"``). When set,
+            ``profiles/{profile}.yaml`` is deep-merged over *config*.
 
     Returns:
         Dictionary with run metadata, paths, and optional YouTube response.
@@ -547,13 +570,11 @@ async def run_pipeline(
 
     LOGGER.info("=== Pipeline run %s started ===", run_id)
 
-    # Load performance cache once — shared by trends scoring and template selection.
-    performance_data = _load_performance_cache(config)
-
     run_ctx: dict[str, Any] = {
         "run_id": run_id,
         "started_at": datetime.now(timezone.utc).isoformat(),
-        "topic": topic,
+        "episode_number": None,
+        "act": None,
         "profile": profile,
         "log_file": str(log_file),
         "status": "running",
@@ -573,47 +594,19 @@ async def run_pipeline(
 
     try:
         async with asyncio.timeout(global_timeout):
-            # Stage 1 — Trends (+ fire deferred analytics in background)
-            await _progress("trends_start", {})
+            # Fire deferred analytics in background
             asyncio.create_task(_process_pending_analytics(config, env))
-            try:
-                topics = await _stage_trends(config, env, run_ctx)
-            except PipelineError as _trend_exc:
-                if topic:
-                    # Topic explicitly provided — trend discovery is optional.
-                    LOGGER.warning(
-                        "[trends] Trend discovery failed (topic provided, continuing): %s",
-                        _trend_exc,
-                    )
-                    topics = []
-                    run_ctx["topics_fetched"] = 0
-                else:
-                    raise
-            await _progress("trends_done", {"count": len(topics)})
 
-            if not topic:
-                if not topics:
-                    raise PipelineError("No trending topics found and no topic was provided.")
-                topic = topics[0]["topic"]
-                LOGGER.info("Auto-selected top topic: %s", topic)
-            run_ctx["topic"] = topic
+            # Episode resolution
+            if episode is None:
+                episode = _next_episode(config)
+                LOGGER.info("[episode] Auto-computed: #%d act=%s", episode["episode_number"], episode["act"])
+            run_ctx["episode_number"] = episode["episode_number"]
+            run_ctx["act"] = episode["act"]
 
-            trend_context = next(
-                (t for t in topics if t.get("topic", "").lower() == topic.lower()),
-                {},
-            )
-
-            # Stage 2 — Script
-            # Filter performance data by profile for per-niche template selection.
-            # Fall back to global data if fewer than 7 profile-specific entries exist.
-            _profile_key = profile or "default"
-            _profile_perf = [e for e in performance_data if e.get("profile") == _profile_key]
-            perf_to_pass = _profile_perf if len(_profile_perf) >= 7 else performance_data
-
-            await _progress("script_start", {"topic": topic})
-            script_payload = await _stage_script(
-                config, env, topic, trend_context, run_ctx, performance_data=perf_to_pass
-            )
+            # Stage 1 — Script
+            await _progress("script_start", {"episode_number": episode["episode_number"], "act": episode["act"]})
+            script_payload = await _stage_script(config, env, episode, run_ctx)
             await _progress("script_done", {"scenes": run_ctx.get("scenes", 0)})
 
             scenes = script_payload["scenes"]
@@ -655,8 +648,8 @@ async def run_pipeline(
                         config,
                         run_id=run_id,
                         video_id=video_id,
-                        template_used=run_ctx.get("template_used", ""),
-                        topic=topic or "",
+                        episode_number=episode.get("episode_number", 0),
+                        act=episode.get("act", ""),
                         profile=profile or "default",
                         backend_used=str(
                             config.get("audio_generation", {}).get("active_backend", "kokoro")
@@ -756,7 +749,8 @@ def _write_run_manifest(
             history_path = logs_dir / "publish_history.jsonl"
             entry = {
                 "run_id": run_id,
-                "topic": run_ctx.get("topic", ""),
+                "episode_number": run_ctx.get("episode_number", 0),
+                "act": run_ctx.get("act", ""),
                 "video_id": run_ctx.get("youtube_video_id", ""),
                 "published_at": run_ctx.get("publish_at") or run_ctx.get("finished_at", ""),
                 "status": "success",
@@ -779,10 +773,29 @@ def _parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--topic",
+        "--episode",
+        type=int,
+        default=None,
+        help="Episode number. If omitted, auto-incremented from history.",
+    )
+    parser.add_argument(
+        "--act",
         type=str,
         default=None,
-        help="Topic to generate. If omitted, top trending topic is used.",
+        choices=["creation", "apogee", "chute", "ruines"],
+        help="Narrative act. If omitted, derived from episode sequence.",
+    )
+    parser.add_argument(
+        "--revelation",
+        type=str,
+        default="",
+        help="Core revelation for this episode.",
+    )
+    parser.add_argument(
+        "--implied-parallel",
+        type=str,
+        default="",
+        help="Contemporary parallel implied by this episode (never verbalized).",
     )
     parser.add_argument(
         "--upload",
@@ -832,10 +845,22 @@ async def _main() -> None:
             print(f"ERROR: Invalid --publish-at format: {exc}", file=sys.stderr)
             sys.exit(1)
 
+    episode: dict[str, Any] | None = None
+    if args.episode is not None or args.act is not None:
+        acts = config.get("script_generation", {}).get("acts", ["creation", "apogee", "chute", "ruines"])
+        episode_number = args.episode if args.episode is not None else 1
+        act = args.act if args.act is not None else acts[0]
+        episode = {
+            "episode_number": episode_number,
+            "act": act,
+            "revelation": args.revelation or "",
+            "implied_parallel": getattr(args, "implied_parallel", "") or "",
+        }
+
     result = await run_pipeline(
         config=config,
         env=env,
-        topic=args.topic,
+        episode=episode,
         upload=args.upload,
         publish_at=publish_at,
         run_id=args.run_id,

@@ -3,10 +3,10 @@
 # This file stores deterministic pipeline behavior and defaults.
 
 project:
-  name: shorts-engine
+  name: koru
   timezone: Europe/Paris
   language: fr
-  niche: "L'IA expliquee par l'Histoire"
+  niche: "KORU — L'IA de Kael'Nar"
 
 paths:
   logs_dir: ./logs
@@ -43,33 +43,6 @@ pipeline:
   # Flow controls — reserved for future parallelism and cleanup flags
   keep_intermediate_files: false  # set true to preserve clips/audio after each run
 
-trends:
-  # Weighted score for ranking candidate topics
-  scoring_weights:
-    google_volume: 0.35
-    google_momentum: 0.30
-    reddit_mentions: 0.20
-    reddit_engagement: 0.15
-
-  google:
-    geo: FR
-    hl: fr-FR
-    tz: 60
-    cat: 0
-    timeframe: now 7-d
-    max_topics: 20
-
-  reddit:
-    subreddits:
-      - artificial
-      - MachineLearning
-      - singularity
-      - histoire
-      - france
-    lookback_hours: 72
-    max_posts_per_subreddit: 25
-    min_score: 5
-
 script_generation:
   provider: gemini
   model: gemini-2.5-flash
@@ -77,11 +50,13 @@ script_generation:
   top_p: 0.95
   max_output_tokens: 8192
 
-  # Narrative templates rotated at each run to avoid repetition
-  template_pool:
-    - revelation
-    - parallele_inverse
-    - countdown
+  # Actes de la saga KORU — séquence éditoriale fixe
+  acts:
+    - creation
+    - apogee
+    - chute
+    - ruines
+  episode_start: 1
 
   # Output contract expected from LLM
   output_format: strict_json
@@ -161,10 +136,11 @@ uploader:
   notify_subscribers: false
   category_id: 28
   default_tags:
-    - IA
-    - Histoire
-    - Vulgarisation
-    - Tech
+    - KORU
+    - civilisation perdue
+    - "Kael'Nar"
+    - IA antiquité
+    - saga épique
     - Shorts
 
 platforms:
@@ -192,15 +168,11 @@ scheduler:
   # Per-profile scheduling (optional — each niche can have its own slots)
   # Set enabled: true and define publish_slots to activate per-profile jobs.
   profiles:
-    ia_histoire:
-      enabled: false
+    koru:
+      enabled: true
       publish_slots:
         - "12:30"
         - "21:00"
-    finance_perso:
-      enabled: false
-      publish_slots:
-        - "18:30"
 
 dashboard:
   host: 127.0.0.1

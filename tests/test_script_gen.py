@@ -25,11 +25,11 @@ from core.script_gen import (
 def _base_config(prompts_dir: Path) -> dict:
     return {
         "script_generation": {
-            "model": "gemini-2.0-flash",
+            "model": "gemini-2.5-flash",
             "temperature": 0.8,
             "top_p": 0.95,
             "max_output_tokens": 4096,
-            "template_pool": ["revelation", "parallele_inverse", "countdown"],
+            "acts": ["creation", "apogee", "chute", "ruines"],
         },
         "pipeline": {
             "min_duration_sec": 50,
@@ -53,7 +53,8 @@ def _make_generator(tmp_path: Path) -> ScriptGenerator:
 
 def _valid_payload(duration: int = 55) -> dict:
     return {
-        "topic": "IA et l'Histoire",
+        "episode_number": 1,
+        "act": "creation",
         "title": "Titre de test",
         "hook": "Hook captivant",
         "narration_text": "Texte de narration complet pour le test.",
@@ -67,14 +68,14 @@ def _valid_payload(duration: int = 55) -> dict:
                 "visual_prompt": "Prompt visuel cinématographique détaillé.",
                 "camera_movement": "slow pan right",
                 "lighting_mood": "golden hour",
-                "historical_era": "XIXe siècle industriel",
+                "historical_era": "Kael'Nar empire apogée",
                 "cinematic_style": "épique dramatique",
             }
         ],
         "metadata": {
             "youtube_title": "Titre YouTube complet",
             "youtube_description": "Description complète pour YouTube.",
-            "youtube_tags": ["ia", "histoire", "tech", "science", "france"],
+            "youtube_tags": ["KORU", "Kael'Nar", "saga", "IA antiquité", "Shorts"],
         },
     }
 
@@ -87,7 +88,7 @@ def _valid_payload(duration: int = 55) -> dict:
 class TestScriptGenConfigFromMapping:
     def test_valid_config_creates_instance(self, tmp_path: Path) -> None:
         cfg = ScriptGenConfig.from_mapping(_base_config(tmp_path))
-        assert cfg.model == "gemini-2.0-flash"
+        assert cfg.model == "gemini-2.5-flash"
         assert cfg.temperature == 0.8
         assert cfg.min_duration_sec == 50
         assert cfg.max_scenes == 8
@@ -110,17 +111,17 @@ class TestScriptGenConfigFromMapping:
         with pytest.raises(ScriptGenerationError, match="paths"):
             ScriptGenConfig.from_mapping(config)
 
-    def test_empty_template_pool_uses_defaults(self, tmp_path: Path) -> None:
+    def test_empty_acts_uses_defaults(self, tmp_path: Path) -> None:
         config = _base_config(tmp_path)
-        config["script_generation"]["template_pool"] = []
+        config["script_generation"]["acts"] = []
         cfg = ScriptGenConfig.from_mapping(config)
-        assert set(cfg.template_pool) == {"revelation", "parallele_inverse", "countdown"}
+        assert set(cfg.acts) == {"creation", "apogee", "chute", "ruines"}
 
-    def test_custom_template_pool_preserved(self, tmp_path: Path) -> None:
+    def test_custom_acts_preserved(self, tmp_path: Path) -> None:
         config = _base_config(tmp_path)
-        config["script_generation"]["template_pool"] = ["custom_a", "custom_b"]
+        config["script_generation"]["acts"] = ["creation", "chute"]
         cfg = ScriptGenConfig.from_mapping(config)
-        assert cfg.template_pool == ["custom_a", "custom_b"]
+        assert cfg.acts == ["creation", "chute"]
 
 
 # ---------------------------------------------------------------------------
@@ -335,29 +336,28 @@ class TestValidateScene:
 
 
 # ---------------------------------------------------------------------------
-# generate_for_topic — early validation (no API call)
+# generate_for_episode — early validation (no API call)
 # ---------------------------------------------------------------------------
 
 
-class TestTopicValidation:
-    def test_empty_topic_raises_before_api(self, tmp_path: Path) -> None:
+class TestEpisodeValidation:
+    def test_empty_dict_raises_before_api(self, tmp_path: Path) -> None:
         gen = _make_generator(tmp_path)
-        with pytest.raises(ScriptGenerationError, match="non-empty"):
-            asyncio.run(gen.generate_for_topic(""))
+        with pytest.raises(ScriptGenerationError, match="non-empty dict"):
+            asyncio.run(gen.generate_for_episode({}))
 
-    def test_whitespace_only_topic_raises(self, tmp_path: Path) -> None:
+    def test_missing_episode_number_raises_validation_error(self, tmp_path: Path) -> None:
         gen = _make_generator(tmp_path)
-        with pytest.raises(ScriptGenerationError, match="non-empty"):
-            asyncio.run(gen.generate_for_topic("    "))
+        with pytest.raises(ScriptValidationError, match="episode_number"):
+            asyncio.run(gen.generate_for_episode({"act": "creation"}))
 
-    def test_topic_over_500_chars_raises_validation_error(self, tmp_path: Path) -> None:
+    def test_missing_act_raises_validation_error(self, tmp_path: Path) -> None:
         gen = _make_generator(tmp_path)
-        with pytest.raises(ScriptValidationError, match="500 characters"):
-            asyncio.run(gen.generate_for_topic("x" * 501))
+        with pytest.raises(ScriptValidationError, match="act"):
+            asyncio.run(gen.generate_for_episode({"episode_number": 1}))
 
-    def test_topic_exactly_500_chars_passes_validation(self, tmp_path: Path) -> None:
-        """Topic of exactly 500 chars should not raise the length guard."""
+    def test_valid_episode_proceeds_to_prompt_read(self, tmp_path: Path) -> None:
+        """A valid episode dict should pass early validation and fail on missing prompt file."""
         gen = _make_generator(tmp_path)
-        # The function will fail later (prompt file missing) — not at the length guard
         with pytest.raises(ScriptGenerationError, match="Prompt file not found"):
-            asyncio.run(gen.generate_for_topic("a" * 500))
+            asyncio.run(gen.generate_for_episode({"episode_number": 1, "act": "creation"}))

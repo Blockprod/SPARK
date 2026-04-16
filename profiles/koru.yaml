@@ -1,0 +1,19 @@
+project:
+  niche: KORU
+  language: fr
+
+script_generation:
+  acts:
+    - creation
+    - apogee
+    - chute
+    - ruines
+
+uploader:
+  default_tags:
+    - KORU
+    - civilisation perdue
+    - "Kael'Nar"
+    - IA antiquité
+    - saga épique
+    - Shorts

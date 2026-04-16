@@ -23,7 +23,7 @@ from typing import Any
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from pipeline import load_config, load_env, run_pipeline
+from pipeline import load_config, load_env, run_pipeline, _next_episode
 
 LOGGER = logging.getLogger("scheduler")
 logging.basicConfig(
@@ -56,7 +56,7 @@ async def _scheduled_pipeline_job(
         env: Environment mapping with credentials.
         slot_label: Human-readable label for this time slot (for logs).
         publish_at_str: Optional ISO-8601 publish time string, or None for no scheduling.
-        profile: Optional niche profile name (e.g. ``"ia_histoire"``).
+        profile: Optional profile name (e.g. ``"koru"``).
     """
     publish_at: datetime | None = None
     if publish_at_str:
@@ -92,7 +92,7 @@ async def _scheduled_pipeline_job(
         result = await run_pipeline(
             config=config,
             env=env,
-            topic=None,
+            episode=_next_episode(config),
             upload=auto_upload,
             publish_at=publish_at,
             profile=profile,

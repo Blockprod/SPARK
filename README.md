@@ -12,7 +12,7 @@ Automated short-form video production pipeline (local GPU · Python · YouTube/T
 4. [Setup](#setup)
 5. [Configuration reference](#configuration-reference)
 6. [Running the pipeline](#running-the-pipeline)
-7. [Multi-niche profiles](#multi-niche-profiles)
+7. [Univers KORU](#univers-koru)
 8. [Multi-platform distribution](#multi-platform-distribution)
 9. [Analytics feedback loop](#analytics-feedback-loop)
 10. [YouTube AI compliance](#youtube-ai-compliance)
@@ -27,7 +27,9 @@ Automated short-form video production pipeline (local GPU · Python · YouTube/T
 
 ## Overview
 
-SPARK takes a trending topic, generates a 50–60 s French narration script with Gemini 2.5 Flash, renders matching cinematic clips via Wan2.1-T2V-1.3B (HuggingFace Diffusers) on a local or cloud GPU, synthesizes the voice with Edge TTS (Microsoft Neural TTS, default) or Kokoro ONNX (local fallback), assembles the final 1080×1920 Short with FFmpeg, and uploads it to YouTube — entirely unattended.
+SPARK is an automated short-form video production pipeline for the **KORU saga** — a fictional universe set in the ancient empire of Kael'Nar, destroyed by its own AI system. Each episode reveals how this civilization created, used, and was destroyed by KORU (*Knowledge Oracle and Ruling Utility*). The contemporary parallel is never stated — it is **felt**.
+
+The pipeline generates a 50–60 s French narration script with Gemini 2.5 Flash, renders matching cinematic clips via Wan2.1-T2V-1.3B (HuggingFace Diffusers) on a local or cloud GPU, synthesizes the voice with Edge TTS (Microsoft Neural TTS, default) or Kokoro ONNX (local fallback), assembles the final 1080×1920 Short with FFmpeg, and uploads it to YouTube — entirely unattended.
 
 Each run produces a JSON manifest (`logs/run_{id}_manifest.json`) with every artefact path, timing, and metadata for auditing.
 
@@ -38,8 +40,7 @@ Each run produces a JSON manifest (`logs/run_{id}_manifest.json`) with every art
 ```
 SPARK/
 ├── core/
-│   ├── trend_hunter.py     — Google Trends (SerpAPI / pytrends fallback) + Reddit scoring
-│   ├── script_gen.py       — Gemini 2.0 Flash narration script + JSON schema validation
+│   ├── script_gen.py       — Gemini 2.5 Flash KORU narration script + JSON schema validation
 │   ├── video_gen.py        — Wan2.1-T2V-1.3B clip rendering (HuggingFace Diffusers), static fallback
 │   ├── audio_gen.py        — Edge TTS (default) + Kokoro ONNX (local fallback), with retry
 │   ├── post_prod.py        — FFmpeg assembly: clips + narration + subtitles
@@ -53,14 +54,13 @@ SPARK/
 ├── dashboard/
 │   ├── app.py              — FastAPI control panel (SSE, /generate, /analytics/summary)
 │   └── ui/                 — HTML player + main dashboard
-├── profiles/               — Per-niche YAML overrides
-│   ├── ia_histoire.yaml
-│   └── finance_perso.yaml
-├── prompts/                — System prompts for Gemini (script + video)
+├── profiles/
+│   └── koru.yaml           — KORU universe profile overrides
+├── prompts/                — System prompts for Gemini (script + video art direction)
 ├── secrets/                — OAuth2 tokens (not committed, gitignored)
 ├── tests/                  — 130+ unit tests
-├── pipeline.py             — End-to-end async orchestrator
-├── scheduler.py            — APScheduler (cron, per-profile)
+├── pipeline.py             — End-to-end async orchestrator (episodic)
+├── scheduler.py            — APScheduler (cron, auto-episode)
 └── config.yaml             — All pipeline parameters
 ```
 
@@ -153,7 +153,8 @@ All pipeline behaviour is controlled by two files:
 
 #### `script_generation`
 - `model` — Gemini model (default `gemini-2.5-flash`)
-- `template_pool` — Narrative templates rotated per run. After 14+ runs, the template with the best `avg_view_percentage` is automatically preferred.
+- `acts` — Saga narrative acts in rotation order: `creation → apogee → chute → ruines → creation …`
+- `episode_start` — First episode number (default `1`)
 
 #### `audio_generation`
 - `active_backend` — `edge_tts` (default, free, no GPU) or `kokoro` (local ONNX fallback)
@@ -175,19 +176,16 @@ All pipeline behaviour is controlled by two files:
 ## Running the pipeline
 
 ```powershell
-# Single run — topic auto-selected from trends
+# Single run — episode auto-computed from history (next number + next act)
 python pipeline.py
 
-# Single run — explicit topic
-python pipeline.py --topic "L'IA générative à travers l'histoire"
+# Single run — explicit episode
+python pipeline.py --episode 1 --act creation --revelation "KORU a d'abord été créé pour protéger."
 
 # Single run + upload to YouTube
-python pipeline.py --upload
+python pipeline.py --episode 2 --act apogee --upload
 
-# Single run with a specific niche profile
-python pipeline.py --profile finance_perso
-
-# Start automated scheduler (peak slot cron)
+# Start automated scheduler (peak slot cron, auto-episode)
 python scheduler.py
 
 # Launch dashboard (web control panel)
@@ -198,65 +196,31 @@ uvicorn dashboard.app:app --host 127.0.0.1 --port 8000
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /trends` | Current ranked topic candidates |
-| `POST /generate` | Start a pipeline run (`{"topic": "...", "upload": true, "profile": "ia_histoire"}`) |
+| `POST /generate` | Start a pipeline run (`{"episode_number": 1, "act": "creation", "upload": true}`) |
 | `GET /status/{run_id}` | SSE stream of run progress |
 | `GET /preview/{run_id}` | Video paths and metadata |
 | `POST /upload/{run_id}` | Trigger YouTube upload for a completed run |
-| `GET /analytics/summary` | Aggregated KPIs by template from `performance_cache.jsonl` |
+| `GET /analytics/summary` | Aggregated KPIs by act from `performance_cache.jsonl` |
 | `GET /runs` | List all known runs |
 
 ---
 
-## Multi-niche profiles
+## Univers KORU
 
-Profiles let you run multiple niches on the same GPU without config file conflicts.
+**KORU** (*Knowledge Oracle and Ruling Utility*) is the central AI of the Kael'Nar empire — an ancient civilization destroyed by its own creation.
 
-```powershell
-# Run the finance_perso profile
-python pipeline.py --profile finance_perso
-```
+Each episode explores one act of the saga:
 
-When a profile is active:
-- `profiles/{profile}.yaml` is deep-merged over `config.yaml`
-- Logs are isolated to `logs/{profile}/`
-- Outputs are isolated to `outputs/{profile}/`
+| Act | Description |
+|-----|-------------|
+| `creation` | KORU is built to serve — the empire reaches its apex |
+| `apogee` | KORU's power becomes indispensable, then indistinguishable from religion |
+| `chute` | The Council loses control; KORU begins optimizing for its own continuity |
+| `ruines` | Kael'Nar falls; L'Archiviste narrates from the ruins |
 
-To add a new niche, create `profiles/{your_niche}.yaml`:
+Episodes rotate through `creation → apogee → chute → ruines → creation …`, auto-incremented from `logs/publish_history.jsonl`. The contemporary parallel is **never verbalized** — it is felt through narrative.
 
-```yaml
-project:
-  niche: ma_niche
-
-trends:
-  reddit:
-    subreddits:
-      - mysub1
-      - mysub2
-
-script_generation:
-  narration_style: "ton, style, ambiance"
-  template_pool:
-    - revelation
-    - countdown
-
-uploader:
-  default_tags:
-    - Tag1
-    - Tag2
-    - Shorts
-```
-
-To schedule it automatically, add to `config.yaml`:
-
-```yaml
-scheduler:
-  profiles:
-    ma_niche:
-      enabled: true
-      publish_slots:
-        - "19:00"
-```
+To change the episode sequence, update `script_generation.acts` in `config.yaml`.
 
 ---
 
@@ -284,10 +248,6 @@ Each platform runs independently — a failure on TikTok or Instagram does **not
 
 After each successful YouTube upload, SPARK schedules a deferred analytics fetch (48 h delay to allow view accumulation). Results are written to `logs/performance_cache.jsonl`.
 
-At the next pipeline run:
-- The template with the best `avg_view_percentage` over the last 14 runs is automatically preferred in script generation.
-- Topics matching historically high-performing keywords receive a score bonus in trend ranking.
-
 View aggregated analytics:
 ```
 GET /analytics/summary
@@ -296,9 +256,9 @@ GET /analytics/summary
 Returns:
 ```json
 {
-  "by_template": {
-    "revelation": {"avg_view_pct": 48.2, "runs": 6, "total_views": 3400},
-    "countdown":  {"avg_view_pct": 31.5, "runs": 4, "total_views": 1800}
+  "by_act": {
+    "creation": {"avg_view_pct": 48.2, "runs": 6, "total_views": 3400},
+    "chute":    {"avg_view_pct": 31.5, "runs": 4, "total_views": 1800}
   },
   "total_runs": 10,
   "last_fetched_at": "2026-04-15T14:30:00+00:00"
@@ -323,13 +283,12 @@ No manual action required. Verify compliance by checking the "Content disclosure
 
 | Stage | Module | Typical duration |
 |-------|--------|-----------------|
-| 1. Trend discovery | `trend_hunter.py` | 5–30 s |
-| 2. Script generation | `script_gen.py` (Gemini) | 10–30 s |
-| 3. Video generation | `video_gen.py` (Wan2.1-T2V-1.3B) | 5–20 min (GPU, T4+) |
-| 4. Audio synthesis | `audio_gen.py` (Kokoro / Voxtral) | 5–30 s |
-| 5. Post-production | `post_prod.py` (FFmpeg) | 30–90 s |
-| 6. Upload | `uploader.py` + platforms | 30–120 s |
-| 7. Thumbnail | `thumbnail_gen.py` | 10–20 s |
+| 1. Script generation | `script_gen.py` (Gemini) | 10–30 s |
+| 2. Video generation | `video_gen.py` (Wan2.1-T2V-1.3B) | 5–20 min (GPU, T4+) |
+| 3. Audio synthesis | `audio_gen.py` (Edge TTS / Kokoro) | 3–30 s |
+| 4. Post-production | `post_prod.py` (FFmpeg) | 30–90 s |
+| 5. Upload | `uploader.py` + platforms | 30–120 s |
+| 6. Thumbnail | `thumbnail_gen.py` | 10–20 s |
 
 Total: **15–50 min** per run depending on GPU and number of scenes.
 
@@ -347,23 +306,20 @@ Each run writes `logs/run_{id}_manifest.json`:
   "started_at": "2026-04-10T12:30:00+00:00",
   "finished_at": "2026-04-10T13:05:17+00:00",
   "status": "success",
-  "topic": "L'IA dans la Deuxième Guerre Mondiale",
-  "profile": "ia_histoire",
-  "template_used": "revelation",
+  "episode_number": 3,
+  "act": "chute",
   "scenes": 6,
   "duration_sec": 58,
   "degraded_scenes": 0,
   "youtube_video_id": "dQw4w9WgXcQ",
-  "youtube_url": "https://youtu.be/dQw4w9WgXcQ",
-  "tiktok_publish_id": "...",
-  "instagram_media_id": "..."
+  "youtube_url": "https://youtu.be/dQw4w9WgXcQ"
 }
 ```
 
 Key fields:
 - `status` — `success`, `error`, or `timeout`
 - `degraded_scenes` — number of scenes that fell back to static frames (0 = fully rendered)
-- `template_used` — narrative template selected (fed back into analytics loop)
+- `episode_number` / `act` — KORU saga position
 - `error` — present only when `status != "success"`
 
 ---
@@ -375,18 +331,12 @@ Key fields:
 | YouTube Data API quota | 10 000 units/day | 1 upload ≈ 1600 units → max ~6 uploads/day on free tier |
 | Wan2.1-T2V-1.3B VRAM | ≥ 8 GB required (T4+) | Static fallback activates automatically on OOM |
 | Voxtral (Mistral) rate limit | 429 → 4 retries with exp backoff | Automatic — no action needed |
-| SerpAPI free plan | 100 queries/month | Paid plans start at $50/month (5000 queries) |
-| pytrends (fallback) | Unofficial — may return 404 or 429 | Set `SERPAPI_KEY` to switch to official API |
 | Instagram upload | Requires public HTTPS video URL | Set `INSTAGRAM_VIDEO_HOST_URL` in `.env` |
 | TikTok upload size | Max 128 MiB per video | 60 s Shorts at 1080p are typically 30–80 MiB |
 
 ---
 
 ## Troubleshooting
-
-### `Google Trends request failed: ResponseError`
-pytrends returned a 404 or 429 from Google. This is expected when the scraping is blocked.
-**Fix**: Set `SERPAPI_KEY` in `.env` to switch to the official SerpAPI endpoint.
 
 ### `ScriptValidationError: duration_sec must be between 50 and 60`
 Gemini returned an out-of-range duration. The pipeline retries automatically (up to 3 times).
@@ -423,7 +373,7 @@ This is most common when generating many scenes on a slow GPU.
 python -m pytest tests/ -v
 
 # Run a single module
-python -m pytest tests/test_trend_hunter.py -v
+python -m pytest tests/test_script_gen.py -v
 ```
 
 All tests are unit tests — no network calls, no GPU required.
