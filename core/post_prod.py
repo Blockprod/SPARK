@@ -156,6 +156,7 @@ class PostProducer:
         scenes: list[dict[str, Any]],
         run_id: str,
         scene_audio_paths: list[Path] | None = None,
+        word_boundaries: list[list[dict[str, Any]]] | None = None,
     ) -> dict[str, str]:
         """Run the full post-production pipeline.
 
@@ -165,6 +166,8 @@ class PostProducer:
             scenes: Validated scene list from script package (for SRT generation).
             run_id: Unique run identifier for output filenames.
             scene_audio_paths: Optional per-scene WAV paths for accurate subtitle timing.
+            word_boundaries: Optional per-scene word boundary lists from Edge TTS
+                for precise word-level subtitle alignment.
 
         Returns:
             Dictionary with keys:
@@ -185,7 +188,11 @@ class PostProducer:
             )
 
         concat_path = await self._concatenate_clips(clip_paths, run_id)
-        srt_path = await self._generate_srt(scenes, run_id, scene_audio_paths=scene_audio_paths)
+        srt_path = await self._generate_srt(
+            scenes, run_id,
+            scene_audio_paths=scene_audio_paths,
+            word_boundaries=word_boundaries,
+        )
         final_path = await self._mix_and_export(
             video_path=concat_path,
             narration_path=narration_path,
@@ -258,18 +265,19 @@ class PostProducer:
     async def _generate_srt(
         self, scenes: list[dict[str, Any]], run_id: str,
         scene_audio_paths: list[Path] | None = None,
+        word_boundaries: list[list[dict[str, Any]]] | None = None,
     ) -> Path:
         """Build a timed ASS subtitle file from scene narration texts.
 
-        When ``scene_audio_paths`` is provided the actual per-scene TTS
-        audio duration is used for timing instead of the nominal video
-        scene duration.  This ensures subtitles track the voice-over
-        precisely regardless of clip length.
+        When ``word_boundaries`` is provided (from Edge TTS WordBoundary events),
+        subtitles are aligned word-by-word for precise lip-sync.
+        Falls back to per-scene audio duration splitting when boundaries are absent.
 
         Args:
             scenes: Scene list with 'narration' and 'duration_sec' fields.
             run_id: Run identifier for output filename.
             scene_audio_paths: Optional per-scene WAV files for accurate timing.
+            word_boundaries: Optional per-scene word boundary lists from Edge TTS.
 
         Returns:
             Path to the written ASS file.
@@ -285,10 +293,15 @@ class PostProducer:
             subs.info["PlayResX"] = str(self.cfg.video_width)
             subs.info["PlayResY"] = str(self.cfg.video_height)
 
+            # Check if we have usable word boundaries for at least one scene
+            has_boundaries = (
+                word_boundaries is not None
+                and any(len(wb) > 0 for wb in word_boundaries)
+            )
+
             current_ms = 0
             for i, scene in enumerate(scenes):
                 duration_sec = int(scene.get("duration_sec", 0))
-                # Use actual TTS audio duration for precise subtitle/audio sync.
                 duration_ms = duration_sec * 1000
                 if scene_audio_paths and i < len(scene_audio_paths):
                     actual = _probe_duration(str(scene_audio_paths[i]))
@@ -296,36 +309,43 @@ class PostProducer:
                         duration_ms = int(actual * 1000)
 
                 narration = str(scene.get("narration", "")).strip()
-
                 if not narration or duration_ms <= 0:
                     current_ms += duration_ms
                     continue
 
-                end_ms = current_ms + duration_ms
-                lines = _wrap_text(
-                    narration,
-                    max_chars=self.cfg.max_chars_per_line,
-                    max_lines=self.cfg.max_lines,
-                )
+                scene_start_ms = current_ms
 
-                chunk_dur_ms = duration_ms // max(len(lines), 1)
-                for chunk_idx, chunk in enumerate(lines):
-                    chunk_start = current_ms + chunk_idx * chunk_dur_ms
-                    chunk_end = min(
-                        chunk_start + chunk_dur_ms - self.cfg.line_padding_ms,
-                        end_ms,
+                if has_boundaries and i < len(word_boundaries) and word_boundaries[i]:
+                    # Word-level alignment from Edge TTS timestamps
+                    _build_word_aligned_events(
+                        subs, word_boundaries[i], scene_start_ms,
+                        self.cfg.max_chars_per_line, self.cfg.max_lines,
                     )
-                    if chunk_start >= chunk_end:
-                        continue
-
-                    event = pysubs2.SSAEvent(
-                        start=chunk_start,
-                        end=chunk_end,
-                        text=chunk,
+                else:
+                    # Fallback: uniform chunk splitting
+                    end_ms = current_ms + duration_ms
+                    lines = _wrap_text(
+                        narration,
+                        max_chars=self.cfg.max_chars_per_line,
+                        max_lines=self.cfg.max_lines,
                     )
-                    subs.append(event)
+                    chunk_dur_ms = duration_ms // max(len(lines), 1)
+                    for chunk_idx, chunk in enumerate(lines):
+                        chunk_start = current_ms + chunk_idx * chunk_dur_ms
+                        chunk_end = min(
+                            chunk_start + chunk_dur_ms - self.cfg.line_padding_ms,
+                            end_ms,
+                        )
+                        if chunk_start >= chunk_end:
+                            continue
+                        event = pysubs2.SSAEvent(
+                            start=chunk_start,
+                            end=chunk_end,
+                            text=chunk,
+                        )
+                        subs.append(event)
 
-                current_ms = end_ms
+                current_ms = scene_start_ms + duration_ms
 
             _apply_ass_style(subs, self.cfg)
             srt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -493,6 +513,85 @@ def _wrap_text(text: str, max_chars: int, max_lines: int) -> list[str]:
     return chunks if chunks else [text]
 
 
+def _build_word_aligned_events(
+    subs: pysubs2.SSAFile,
+    boundaries: list[dict[str, Any]],
+    scene_start_ms: int,
+    max_chars: int,
+    max_lines: int,
+) -> None:
+    """Build subtitle events from Edge TTS WordBoundary timestamps.
+
+    Groups consecutive words into subtitle chunks (respecting max_chars
+    and max_lines), using the actual word timing from the TTS engine.
+    """
+    if not boundaries:
+        return
+
+    # Group words into display chunks
+    current_words: list[str] = []
+    current_line_len = 0
+    line_count = 1
+    chunk_start_ms = scene_start_ms + boundaries[0]["offset_ms"]
+    chunk_end_ms = chunk_start_ms
+
+    for wb in boundaries:
+        word = wb["text"]
+        word_start = scene_start_ms + wb["offset_ms"]
+        word_end = word_start + wb["duration_ms"]
+
+        new_len = current_line_len + len(word) + (1 if current_words else 0)
+
+        if new_len > max_chars:
+            if line_count < max_lines:
+                # Start a new line within the same chunk
+                current_words.append("\\N" + word)
+                current_line_len = len(word)
+                line_count += 1
+            else:
+                # Flush current chunk and start a new one
+                if current_words:
+                    event = pysubs2.SSAEvent(
+                        start=chunk_start_ms,
+                        end=chunk_end_ms,
+                        text=" ".join(current_words),
+                    )
+                    subs.append(event)
+                current_words = [word]
+                current_line_len = len(word)
+                line_count = 1
+                chunk_start_ms = word_start
+        else:
+            current_words.append(word)
+            current_line_len = new_len
+
+        chunk_end_ms = word_end
+
+    # Flush last chunk
+    if current_words:
+        event = pysubs2.SSAEvent(
+            start=chunk_start_ms,
+            end=chunk_end_ms,
+            text=" ".join(current_words),
+        )
+        subs.append(event)
+
+
+def _parse_ass_color(hex_color: str) -> pysubs2.Color:
+    """Parse ASS hex color string like '&H00FFFFFF' to pysubs2.Color.
+
+    ASS color format: &HAABBGGRR (alpha, blue, green, red).
+    pysubs2.Color(r, g, b, a).
+    """
+    hex_color = hex_color.strip().lstrip("&").lstrip("H").lstrip("h")
+    hex_color = hex_color.zfill(8)
+    a = int(hex_color[0:2], 16)
+    b = int(hex_color[2:4], 16)
+    g = int(hex_color[4:6], 16)
+    r = int(hex_color[6:8], 16)
+    return pysubs2.Color(r, g, b, a)
+
+
 def _apply_ass_style(subs: pysubs2.SSAFile, cfg: PostProdConfig) -> None:
     """Set default ASS subtitle style on a pysubs2 SSAFile.
 
@@ -503,9 +602,9 @@ def _apply_ass_style(subs: pysubs2.SSAFile, cfg: PostProdConfig) -> None:
     style = pysubs2.SSAStyle(
         fontname=cfg.font_name,
         fontsize=cfg.font_size,
-        primarycolor=pysubs2.Color(255, 255, 255, 0),
-        outlinecolor=pysubs2.Color(0, 0, 0, 0),
-        backcolor=pysubs2.Color(0, 0, 0, 100),
+        primarycolor=_parse_ass_color(cfg.primary_color),
+        outlinecolor=_parse_ass_color(cfg.outline_color),
+        backcolor=_parse_ass_color(cfg.back_color),
         outline=cfg.outline,
         shadow=cfg.shadow,
         alignment=cfg.alignment,
@@ -553,6 +652,7 @@ async def run_post_production(
     scenes: list[dict[str, Any]],
     run_id: str,
     scene_audio_paths: list[Path] | None = None,
+    word_boundaries: list[list[dict[str, Any]]] | None = None,
 ) -> dict[str, str]:
     """Public async entry point for post-production.
 
@@ -563,6 +663,7 @@ async def run_post_production(
         scenes: Validated scene list from script package (for SRT timing).
         run_id: Unique identifier for this pipeline run.
         scene_audio_paths: Optional per-scene WAV paths for accurate subtitle timing.
+        word_boundaries: Optional per-scene word boundary lists from Edge TTS.
 
     Returns:
         Dictionary with:
@@ -580,5 +681,6 @@ async def run_post_production(
         scenes=scenes,
         run_id=run_id,
         scene_audio_paths=scene_audio_paths,
+        word_boundaries=word_boundaries,
     )
     return result

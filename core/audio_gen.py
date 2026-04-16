@@ -108,7 +108,7 @@ class TTSBackend(ABC):
         """Synthesize speech for the given text and write it to output_path.
 
         Args:
-            text: Narration text to synthesize (plain UTF-8, no SSML).
+            text: Narration text to synthesize (plain UTF-8).
             output_path: Absolute path for the output audio file.
 
         Returns:
@@ -117,6 +117,23 @@ class TTSBackend(ABC):
         Raises:
             AudioGenerationError: On synthesis or I/O failure.
         """
+
+
+def _add_ssml_pauses(text: str) -> str:
+    """Add SSML-style pauses after sentence-ending punctuation for Edge TTS.
+
+    Edge TTS supports inline SSML breaks. This inserts short pauses after
+    periods, exclamation marks, and question marks to give a more natural
+    narration rhythm instead of a flat machine-gun delivery.
+    """
+    import re
+    # Add 350ms pause after sentence-ending punctuation followed by a space
+    result = re.sub(
+        r'([.!?…])\s+',
+        r'\1 <break time="350ms"/> ',
+        text,
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -212,14 +229,14 @@ class EdgeTTSBackend(TTSBackend):
     Voices recommended for French:
       - fr-FR-DeniseNeural  (female, warm, clear)
       - fr-FR-HenriNeural   (male, professional)
-      - fr-FR-VivienneNeural (female, expressive)
+      - fr-FR-VivienneMultilingualNeural (female, expressive, multilingual)
     """
 
     def __init__(self, cfg: AudioGenConfig) -> None:
         self.cfg = cfg
 
     async def synthesize(self, text: str, output_path: Path) -> Path:
-        """Synthesize speech via Edge TTS and write MP3/WAV to output_path.
+        """Synthesize speech via Edge TTS and write MP3 to output_path.
 
         Args:
             text: Plain French narration text.
@@ -247,7 +264,7 @@ class EdgeTTSBackend(TTSBackend):
 
         try:
             communicate = edge_tts.Communicate(
-                text=text.strip(),
+                text=_add_ssml_pauses(text.strip()),
                 voice=self.cfg.edge_tts_voice,
                 rate=self.cfg.edge_tts_rate,
                 pitch=self.cfg.edge_tts_pitch,
@@ -267,6 +284,63 @@ class EdgeTTSBackend(TTSBackend):
             "Edge TTS wrote %s (voice=%s)", mp3_path, self.cfg.edge_tts_voice
         )
         return mp3_path
+
+    async def synthesize_with_timestamps(
+        self, text: str, output_path: Path,
+    ) -> tuple[Path, list[dict[str, Any]]]:
+        """Synthesize speech and capture WordBoundary events for subtitle alignment.
+
+        Returns:
+            Tuple of (audio_path, word_boundaries) where word_boundaries is a list
+            of dicts with keys: offset_ms, duration_ms, text.
+        """
+        if not text or not text.strip():
+            raise AudioGenerationError("Cannot synthesize empty narration text.")
+
+        try:
+            import edge_tts
+        except ImportError as exc:
+            raise AudioGenerationError(
+                "edge-tts is not installed. Run: pip install edge-tts"
+            ) from exc
+
+        mp3_path = output_path.with_suffix(".mp3")
+        mp3_path.parent.mkdir(parents=True, exist_ok=True)
+
+        word_boundaries: list[dict[str, Any]] = []
+
+        communicate = edge_tts.Communicate(
+            text=_add_ssml_pauses(text.strip()),
+            voice=self.cfg.edge_tts_voice,
+            rate=self.cfg.edge_tts_rate,
+            pitch=self.cfg.edge_tts_pitch,
+        )
+
+        try:
+            with open(str(mp3_path), "wb") as f:
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        f.write(chunk["data"])
+                    elif chunk["type"] == "WordBoundary":
+                        word_boundaries.append({
+                            "offset_ms": chunk["offset"] // 10_000,  # 100ns ticks → ms
+                            "duration_ms": chunk["duration"] // 10_000,
+                            "text": chunk["text"],
+                        })
+        except Exception as exc:
+            raise AudioGenerationError(
+                f"Edge TTS streaming synthesis failed: {exc}"
+            ) from exc
+
+        if not mp3_path.exists() or mp3_path.stat().st_size < 100:
+            raise AudioGenerationError(
+                f"Edge TTS produced empty or missing file: {mp3_path}"
+            )
+
+        LOGGER.debug(
+            "Edge TTS wrote %s with %d word boundaries", mp3_path, len(word_boundaries)
+        )
+        return mp3_path, word_boundaries
 
 
 # ---------------------------------------------------------------------------
@@ -292,15 +366,18 @@ class AudioGenerator:
 
     async def generate_scene_audio(
         self, scenes: list[dict[str, Any]], run_id: str
-    ) -> list[Path]:
-        """Generate one WAV file per scene narration.
+    ) -> tuple[list[Path], list[list[dict[str, Any]]]]:
+        """Generate one audio file per scene narration.
 
         Args:
             scenes: Validated scene list from script package.
             run_id: Unique run identifier for file naming.
 
         Returns:
-            Ordered list of absolute paths to per-scene WAV files.
+            Tuple of (audio_paths, word_boundaries_per_scene).
+            word_boundaries_per_scene is a list of word boundary lists (one per scene).
+            Each boundary dict has keys: offset_ms, duration_ms, text.
+            Empty lists for non-Edge-TTS backends.
 
         Raises:
             AudioGenerationError: If any scene synthesis fails.
@@ -310,6 +387,7 @@ class AudioGenerator:
 
         self.cfg.audio_dir.mkdir(parents=True, exist_ok=True)
         audio_paths: list[Path] = []
+        all_word_boundaries: list[list[dict[str, Any]]] = []
 
         for scene in scenes:
             scene_id = int(scene.get("scene_id", len(audio_paths) + 1))
@@ -326,29 +404,38 @@ class AudioGenerator:
             LOGGER.info(
                 "Synthesizing scene %d/%d audio…", scene_id, len(scenes)
             )
-            written_path = await self._backend.synthesize(
-                text=narration, output_path=output_path
-            )
+
+            if isinstance(self._backend, EdgeTTSBackend):
+                written_path, boundaries = await self._backend.synthesize_with_timestamps(
+                    text=narration, output_path=output_path
+                )
+                all_word_boundaries.append(boundaries)
+            else:
+                written_path = await self._backend.synthesize(
+                    text=narration, output_path=output_path
+                )
+                all_word_boundaries.append([])
+
             audio_paths.append(written_path)
 
-        return audio_paths
+        return audio_paths, all_word_boundaries
 
     async def generate_full_narration(
         self, scenes: list[dict[str, Any]], run_id: str
-    ) -> Path:
-        """Concatenate all scene narrations into a single continuous WAV.
+    ) -> tuple[Path, list[Path], list[list[dict[str, Any]]]]:
+        """Concatenate all scene narrations into a single continuous audio file.
 
         Args:
             scenes: Validated scene list from script package.
             run_id: Unique run identifier for file naming.
 
         Returns:
-            Absolute path to the concatenated narration WAV file.
+            Tuple of (narration_path, scene_paths, word_boundaries_per_scene).
 
         Raises:
             AudioGenerationError: If synthesis or concatenation fails.
         """
-        scene_paths = await self.generate_scene_audio(scenes=scenes, run_id=run_id)
+        scene_paths, word_boundaries = await self.generate_scene_audio(scenes=scenes, run_id=run_id)
         # Detect output extension from actual files produced (wav or mp3)
         out_ext = scene_paths[0].suffix if scene_paths else ".wav"
         concat_path = self.cfg.audio_dir / f"{run_id}_narration_full{out_ext}"
@@ -415,7 +502,8 @@ class AudioGenerator:
             LOGGER.info("Full narration written -> %s (%.1fs)", concat_path, dur)
             return concat_path
 
-        return await asyncio.to_thread(_concat)
+        narration_path = await asyncio.to_thread(_concat)
+        return narration_path, scene_paths, word_boundaries
 
 
 # ---------------------------------------------------------------------------
@@ -439,8 +527,9 @@ async def generate_audio(
 
     Returns:
         Dictionary with keys:
-          - "scene_paths": list of per-scene WAV paths (strings)
-          - "narration_path": path to concatenated narration WAV (string)
+          - "scene_paths": list of per-scene audio paths (strings)
+          - "narration_path": path to concatenated narration audio (string)
+          - "word_boundaries": list of per-scene word boundary lists
 
     Raises:
         AudioGenerationError: On configuration or synthesis failure.
@@ -448,21 +537,12 @@ async def generate_audio(
     cfg = AudioGenConfig.from_mapping(config)
     generator = AudioGenerator(cfg=cfg)
 
-    # generate_full_narration internally calls generate_scene_audio.
-    # Previously generate_scene_audio was called separately here, doubling
-    # synthesis time.  Removed — scene paths are reconstructed from the
-    # deterministic naming convention used by generate_scene_audio.
-    narration_path = await generator.generate_full_narration(
+    narration_path, scene_paths, word_boundaries = await generator.generate_full_narration(
         scenes=scenes, run_id=run_id
     )
-    # Determine correct extension based on active backend
-    _ext = ".mp3" if cfg.active_backend.lower() == "edge_tts" else ".wav"
-    scene_paths = [
-        cfg.audio_dir / f"{run_id}_scene{int(s.get('scene_id', i + 1)):02d}{_ext}"
-        for i, s in enumerate(scenes)
-    ]
 
     return {
         "scene_paths": [str(p) for p in scene_paths],
         "narration_path": str(narration_path),
+        "word_boundaries": word_boundaries,
     }

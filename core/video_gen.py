@@ -179,10 +179,17 @@ class VideoGenerator:
                     LOGGER.debug("Progress callback error (non-fatal): %s", cb_exc)
 
         if degraded_scenes:
+            ratio = len(degraded_scenes) / len(scenes)
             LOGGER.warning(
                 "Run '%s': %d/%d scene(s) used placeholder: %s",
                 run_id, len(degraded_scenes), len(scenes), degraded_scenes,
             )
+            if ratio > 0.5:
+                raise VideoGenerationError(
+                    f"Too many degraded scenes ({len(degraded_scenes)}/{len(scenes)}). "
+                    f"Aborting — the output would be unusable. "
+                    f"Check GPU memory (nvidia-smi) and model loading logs."
+                )
 
         LOGGER.info(
             "Video generation complete: %d clips for run '%s'.",

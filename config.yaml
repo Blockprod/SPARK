@@ -46,8 +46,8 @@ pipeline:
 script_generation:
   provider: gemini
   model: gemini-2.5-flash
-  temperature: 0.8
-  top_p: 0.95
+  temperature: 0.5
+  top_p: 0.85
   max_output_tokens: 8192
 
   # Actes de la saga KORU — séquence éditoriale fixe
@@ -88,7 +88,7 @@ audio_generation:
   # Voices: fr-FR-DeniseNeural (warm female), fr-FR-HenriNeural (professional male)
   #         fr-FR-VivienneNeural (expressive female), fr-FR-EloiseNeural (young female)
   edge_tts:
-    voice: fr-FR-DeniseNeural
+    voice: fr-FR-VivienneMultilingualNeural
     rate: "-5%"    # slight slowdown for clearer articulation on Shorts
     pitch: "+0Hz"
 

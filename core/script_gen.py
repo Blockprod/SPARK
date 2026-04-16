@@ -111,12 +111,6 @@ class ScriptGenerator:
         self._request_timeout = float(self.env.get("GEMINI_REQUEST_TIMEOUT_SEC", "60"))
 
         self._client = genai.Client(api_key=api_key)
-        self._gen_config = genai_types.GenerateContentConfig(
-            temperature=self.cfg.temperature,
-            top_p=self.cfg.top_p,
-            max_output_tokens=self.cfg.max_output_tokens,
-            response_mime_type="application/json",
-        )
 
     async def generate_for_episode(
         self,
@@ -171,14 +165,21 @@ class ScriptGenerator:
 
     async def _generate_raw(self, system_prompt: str, user_prompt: str) -> str:
         def _invoke() -> str:
+            # Build config with system_instruction set to the KORU bible + art direction.
+            # This uses Gemini's dedicated system instruction slot instead of sending
+            # the prompt as a "user" message — the model treats it as authoritative context.
+            config = genai_types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=self.cfg.temperature,
+                top_p=self.cfg.top_p,
+                max_output_tokens=self.cfg.max_output_tokens,
+                response_mime_type="application/json",
+            )
             try:
                 response = self._client.models.generate_content(
                     model=self.cfg.model,
-                    contents=[
-                        genai_types.Content(role="user", parts=[genai_types.Part(text=system_prompt)]),
-                        genai_types.Content(role="user", parts=[genai_types.Part(text=user_prompt)]),
-                    ],
-                    config=self._gen_config,
+                    contents=user_prompt,
+                    config=config,
                 )
             except Exception as exc:
                 raise ScriptGenerationError(f"Gemini request failed: {exc}") from exc
