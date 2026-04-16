@@ -61,6 +61,32 @@ class VideoGenConfig:
     max_scene_duration_sec: int
     negative_prompt: str
 
+    def _auto_adjust_for_vram(self) -> None:
+        """Reduce resolution / frame budget when GPU VRAM is limited (e.g. T4 16 GB)."""
+        try:
+            import torch as _torch
+            if not _torch.cuda.is_available():
+                return
+            total_gb = _torch.cuda.get_device_properties(0).total_mem / (1024 ** 3)
+        except Exception:
+            return
+
+        if total_gb < 20:
+            old_w, old_h = self.width, self.height
+            # 288×512 keeps 9:16 and fits comfortably in T4 VRAM
+            self.width = min(self.width, 288)
+            self.height = min(self.height, 512)
+            # Cap config-level num_frames (per-scene frames are also capped
+            # via _compute_num_frames's max_frames parameter, see below).
+            self.num_frames = min(self.num_frames, 33)
+            if old_w != self.width or old_h != self.height:
+                LOGGER.info(
+                    "VRAM auto-adjust (%.1f GiB): resolution %dx%d -> %dx%d, "
+                    "max frames %d",
+                    total_gb, old_w, old_h, self.width, self.height,
+                    self.num_frames,
+                )
+
     @classmethod
     def from_mapping(cls, config: dict[str, Any]) -> "VideoGenConfig":
         video_cfg = config.get("video_generation")
@@ -78,7 +104,7 @@ class VideoGenConfig:
         scenes_cfg = video_cfg.get("scenes", {})
         clips_dir = Path(str(paths_cfg.get("clips_dir", "./outputs/clips"))).resolve()
 
-        return cls(
+        instance = cls(
             model_id=str(video_cfg.get("model_id", "Wan-AI/Wan2.1-T2V-1.3B-Diffusers")),
             device=str(video_cfg.get("device", "cuda")),
             height=int(pipeline_cfg.get("target_height", 832)),
@@ -95,6 +121,8 @@ class VideoGenConfig:
                 video_cfg.get("negative_prompt", _DEFAULT_NEGATIVE_PROMPT)
             ),
         )
+        instance._auto_adjust_for_vram()
+        return instance
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +192,12 @@ class VideoGenerator:
                 )
                 clip_paths.append(fallback)
                 degraded_scenes.append(scene_id)
+
+            # Free GPU memory between scenes to avoid OOM accumulation
+            import gc as _gc
+            _gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
             if progress_callback is not None:
                 try:
@@ -235,7 +269,7 @@ class VideoGenerator:
                 int(scene.get("duration_sec", 5)),
                 self.cfg.max_scene_duration_sec,
             )
-            num_frames = _compute_num_frames(duration, self.cfg.fps)
+            num_frames = _compute_num_frames(duration, self.cfg.fps, max_frames=self.cfg.num_frames)
 
             LOGGER.info(
                 "Scene %d: %dx%d | %d frames @%dfps | seed=%d | prompt=%r",
@@ -362,13 +396,12 @@ class VideoGenerator:
 # ---------------------------------------------------------------------------
 
 
-def _compute_num_frames(duration_sec: int, fps: float) -> int:
+def _compute_num_frames(duration_sec: int, fps: float, max_frames: int = 129) -> int:
     """Frame count satisfying the 4k+1 constraint required by Wan2.1."""
     raw = int(duration_sec * fps)
     k = max(1, round((raw - 1) / 4))
     adjusted = 4 * k + 1
-    # Cap at 129 frames (~8 sec at 16 fps) to stay within T4 VRAM budget
-    return max(17, min(adjusted, 129))
+    return max(17, min(adjusted, max_frames))
 
 
 def _save_frames_to_mp4(
