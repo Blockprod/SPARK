@@ -366,6 +366,17 @@ class VideoGenerator:
                 torch_dtype=torch.bfloat16,
                 low_cpu_mem_usage=True,
             )
+            # UMT5 weight-tying fix: the checkpoint stores the token embedding
+            # as `shared.weight` only; `encoder.embed_tokens.weight` is a tied
+            # alias but is NOT saved separately.  Diffusers' from_pretrained
+            # does not restore the tie automatically, leaving embed_tokens with
+            # random weights → grey/noise output.  Calling tie_weights() here
+            # copies shared.weight → encoder.embed_tokens.weight before any
+            # offload hooks are installed.
+            if hasattr(pipe, "text_encoder") and hasattr(
+                pipe.text_encoder, "tie_weights"
+            ):
+                pipe.text_encoder.tie_weights()
             # flow_shift: 3.0 for 480 P, 5.0 for 720 P
             pipe.scheduler = UniPCMultistepScheduler.from_config(
                 pipe.scheduler.config,
