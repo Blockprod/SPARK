@@ -411,13 +411,13 @@ def _save_frames_to_mp4(
     fps: float,
 ) -> None:
     """Write a list of PIL images (or numpy arrays) to an MP4 file via OpenCV."""
-    if not frames:
+    if frames is None or len(frames) == 0:
         raise VideoGenerationError("No frames to save.")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     first = frames[0]
-    if hasattr(first, "size"):       # PIL Image: .size = (width, height)
+    if hasattr(first, "mode"):       # PIL Image: .mode = 'RGB', .size = (width, height)
         w, h = first.size
     else:
         arr = np.array(first)
@@ -431,10 +431,10 @@ def _save_frames_to_mp4(
         )
 
     for frame in frames:
-        if hasattr(frame, "size"):
+        if hasattr(frame, "mode"):
             arr = np.array(frame)
         else:
-            arr = frame
+            arr = np.asarray(frame)
         if arr.dtype != np.uint8:
             arr = (arr * 255).clip(0, 255).astype(np.uint8)
         bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
