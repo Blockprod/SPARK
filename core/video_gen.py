@@ -1,12 +1,16 @@
 # -*- coding: utf-8 -*-
-"""Wan2.1 1.3B text-to-video generation via HuggingFace Diffusers.
+"""LTX-Video 2B text-to-video generation via HuggingFace Diffusers.
 
-Each scene from the script package is rendered independently using WanPipeline
-(T2V-1.3B). The model requires ~8.2 GB VRAM — compatible with T4 (Colab free
-tier, 16 GB VRAM) and any A-series GPU.
+Each scene from the script package is rendered independently using LTXPipeline
+(Lightricks/LTX-Video, 2B params). The model requires ~4 GB VRAM with
+sequential CPU offload — fully compatible with T4 (14.56 GB VRAM).
 
-The model is downloaded automatically by Diffusers on first run (~8 GB, ~5 min
-on Colab's fast network), and cached at /root/.cache/huggingface/.
+Constraints imposed by LTX-Video:
+  - Width and height must be divisible by 32.
+  - Number of frames must satisfy 8k+1 (e.g. 9, 17, 25, 33, 41, ..., 257).
+
+The model is downloaded automatically by Diffusers on first run (~5 GB, ~2 min
+on Kaggle's fast network), and cached at /root/.cache/huggingface/.
 """
 
 from __future__ import annotations
@@ -35,11 +39,9 @@ class VideoGenerationError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 _DEFAULT_NEGATIVE_PROMPT = (
-    "Bright tones, overexposed, static, blurred details, subtitles, "
-    "style, works, paintings, images, static, overall gray, worst quality, "
-    "low quality, JPEG compression residue, ugly, incomplete, deformed, "
-    "disfigured, misshapen limbs, fused fingers, still picture, "
-    "messy background, walking backwards"
+    "worst quality, inconsistent motion, blurry, jittery, distorted, "
+    "overexposed, static, flickering, low resolution, artifacts, "
+    "deformed, disfigured, watermark, text, subtitles"
 )
 
 
@@ -73,12 +75,11 @@ class VideoGenConfig:
 
         if total_gb < 20:
             old_w, old_h = self.width, self.height
-            # 288×512 keeps 9:16 and fits comfortably in T4 VRAM
+            # 288×512: 9:16 portrait, both divisible by 32 (LTX requirement).
             self.width = min(self.width, 288)
             self.height = min(self.height, 512)
-            # Cap config-level num_frames (per-scene frames are also capped
-            # via _compute_num_frames's max_frames parameter, see below).
-            self.num_frames = min(self.num_frames, 33)
+            # 65 = 8*8+1 satisfies LTX 8k+1 constraint, gives ~2.7 s at 24 fps.
+            self.num_frames = min(self.num_frames, 65)
             if old_w != self.width or old_h != self.height:
                 LOGGER.info(
                     "VRAM auto-adjust (%.1f GiB): resolution %dx%d -> %dx%d, "
@@ -105,13 +106,13 @@ class VideoGenConfig:
         clips_dir = Path(str(paths_cfg.get("clips_dir", "./outputs/clips"))).resolve()
 
         instance = cls(
-            model_id=str(video_cfg.get("model_id", "Wan-AI/Wan2.1-T2V-1.3B-Diffusers")),
+            model_id=str(video_cfg.get("model_id", "Lightricks/LTX-Video")),
             device=str(video_cfg.get("device", "cuda")),
             height=int(pipeline_cfg.get("target_height", 832)),
             width=int(pipeline_cfg.get("target_width", 480)),
             num_frames=int(video_cfg.get("num_frames", 81)),
             num_inference_steps=int(video_cfg.get("num_inference_steps", 25)),
-            guidance_scale=float(video_cfg.get("guidance_scale", 5.0)),
+            guidance_scale=float(video_cfg.get("guidance_scale", 3.0)),
             fps=float(pipeline_cfg.get("target_fps", 16)),
             seed=int(gen_cfg.get("seed", -1)),
             clips_dir=clips_dir,
@@ -131,7 +132,7 @@ class VideoGenConfig:
 
 
 class VideoGenerator:
-    """Wan2.1 1.3B WanPipeline wrapper for per-scene video generation."""
+    """LTX-Video 2B LTXPipeline wrapper for per-scene video generation."""
 
     def __init__(self, cfg: VideoGenConfig) -> None:
         self.cfg = cfg
@@ -241,7 +242,7 @@ class VideoGenerator:
         scene_id: int,
         seed: int,
     ) -> Path:
-        """Render a single scene using WanPipeline in a background thread."""
+        """Render a single scene using LTXPipeline in a background thread."""
 
         def _run() -> Path:
             try:
@@ -306,7 +307,7 @@ class VideoGenerator:
                     gc.collect()
                     torch.cuda.empty_cache()
                 raise VideoGenerationError(
-                    f"Wan2.1 inference failed for scene {scene_id}: {exc}"
+                    f"LTX-Video inference failed for scene {scene_id}: {exc}"
                 ) from exc
 
             try:
@@ -326,79 +327,47 @@ class VideoGenerator:
         return await asyncio.to_thread(_run)
 
     def _get_pipeline(self) -> Any:
-        """Lazily load WanPipeline once and cache it across all scenes.
+        """Lazily load LTXPipeline once and cache it across all scenes.
 
-        Memory strategy (enable_model_cpu_offload — Kaggle T4):
-          - All sub-models loaded to CPU RAM in bfloat16 (0 VRAM during load).
-          - During inference each sub-module auto-migrates to GPU just before
-            its forward() call and returns to CPU immediately after.
-          - Peak VRAM ≈ 2.6 GB (transformer only). Fits on T4 (14.56 GB).
-          - Requires ~25 GB CPU RAM (Kaggle T4 provides ~30 GB). ✓
+        Memory strategy (sequential_cpu_offload — Kaggle T4):
+          - LTX-Video 2B in bfloat16 ≈ 4 GB.  No giant text encoder.
+          - Sequential offload keeps peak VRAM well under 14.56 GB.
+          - Returns PIL images directly → no numpy dtype conversion needed.
         """
         if self._pipeline is not None:
             return self._pipeline
 
         import gc
         import torch
-        from diffusers import WanPipeline
-        from diffusers.schedulers.scheduling_unipc_multistep import (
-            UniPCMultistepScheduler,
-        )
+        from diffusers import LTXPipeline
 
         model_id = self.cfg.model_id
         LOGGER.info(
-            "Loading Wan2.1 pipeline: %s (sequential CPU offload)…",
+            "Loading LTX-Video pipeline: %s (sequential CPU offload)…",
             model_id,
         )
         try:
-            # Warm up CUDA context so cuBLAS can initialise cleanly before
-            # any model weights touch the GPU.
             if torch.cuda.is_available():
                 _w = torch.zeros(1, device="cuda")
                 del _w
                 torch.cuda.empty_cache()
 
-            # Load all sub-models to CPU RAM in bfloat16.
-            # low_cpu_mem_usage=True avoids double-buffering during weight
-            # copying, keeping peak CPU RAM ≈ total model size (~25 GB).
-            pipe = WanPipeline.from_pretrained(
+            pipe = LTXPipeline.from_pretrained(
                 model_id,
                 torch_dtype=torch.bfloat16,
                 low_cpu_mem_usage=True,
             )
-            # UMT5 weight-tying fix: the checkpoint stores the token embedding
-            # as `shared.weight` only; `encoder.embed_tokens.weight` is a tied
-            # alias but is NOT saved separately.  Diffusers' from_pretrained
-            # does not restore the tie automatically, leaving embed_tokens with
-            # random weights → grey/noise output.  Calling tie_weights() here
-            # copies shared.weight → encoder.embed_tokens.weight before any
-            # offload hooks are installed.
-            if hasattr(pipe, "text_encoder") and hasattr(
-                pipe.text_encoder, "tie_weights"
-            ):
-                pipe.text_encoder.tie_weights()
-            # flow_shift: 3.0 for 480 P, 5.0 for 720 P
-            pipe.scheduler = UniPCMultistepScheduler.from_config(
-                pipe.scheduler.config,
-                flow_shift=3.0,
-            )
-            # Sequential offload: PyTorch hooks move each individual layer
-            # to GPU just before its forward() call, then back to CPU.
-            # The UMT5-XXL text encoder is 22.7 GB bfloat16 — it cannot fit
-            # on the T4 (14.56 GB) as a whole sub-model, but its individual
-            # layers (~940 MB each) fit easily.  Peak VRAM < 1 GB.
-            # Slower than model_cpu_offload but the only option that avoids
-            # CUBLAS_STATUS_ALLOC_FAILED caused by whole-encoder OOM.
             pipe.enable_sequential_cpu_offload()
 
         except Exception as exc:
             gc.collect()
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             raise VideoGenerationError(
-                f"Failed to load Wan2.1 pipeline '{model_id}': {exc}"
+                f"Failed to load LTX-Video pipeline '{model_id}': {exc}"
             ) from exc
 
-        LOGGER.info("Wan2.1 pipeline loaded (sequential_cpu_offload).")
+        LOGGER.info("LTX-Video pipeline loaded (sequential_cpu_offload).")
         self._pipeline = pipe
         return self._pipeline
 
@@ -408,12 +377,12 @@ class VideoGenerator:
 # ---------------------------------------------------------------------------
 
 
-def _compute_num_frames(duration_sec: int, fps: float, max_frames: int = 129) -> int:
-    """Frame count satisfying the 4k+1 constraint required by Wan2.1."""
+def _compute_num_frames(duration_sec: int, fps: float, max_frames: int = 257) -> int:
+    """Frame count satisfying the 8k+1 constraint required by LTX-Video."""
     raw = int(duration_sec * fps)
-    k = max(1, round((raw - 1) / 4))
-    adjusted = 4 * k + 1
-    return max(17, min(adjusted, max_frames))
+    k = max(1, round((raw - 1) / 8))
+    adjusted = 8 * k + 1
+    return max(9, min(adjusted, max_frames))
 
 
 def _save_frames_to_mp4(

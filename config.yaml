@@ -65,15 +65,16 @@ script_generation:
   include_cta: true
 
 video_generation:
-  provider: wan
-  # Wan2.1 1.3B — downloaded automatically by Diffusers on first run (~8 Go, ~5 min)
-  # Compatible T4 Colab gratuit (16 Go VRAM) — aucun A100 requis
-  model_id: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+  provider: ltx
+  # LTX-Video 2B (Lightricks) via Diffusers — ~5 GB download, ~4 GB VRAM peak
+  # Constraints: width/height divisible by 32, num_frames = 8k+1
+  # Compatible with T4 (14.56 GB VRAM) using sequential CPU offload.
+  model_id: Lightricks/LTX-Video
   device: cuda
-  num_frames: 81        # 4*20+1 = ~5 sec a 16 fps
+  num_frames: 65        # 8*8+1 = ~2.7 sec at 24 fps
   num_inference_steps: 25
-  guidance_scale: 5.0
-  use_cpu_offload: true   # requis pour T4 (16 Go) — text encoder UMT5-XXL ~10 Go
+  guidance_scale: 3.0
+  use_cpu_offload: true   # requis pour T4 — sequential offload
 
   generation:
     seed: -1  # -1 = seed deterministe par run_id
