@@ -78,8 +78,8 @@ class VideoGenConfig:
             # 288×512: 9:16 portrait, both divisible by 32 (LTX requirement).
             self.width = min(self.width, 288)
             self.height = min(self.height, 512)
-            # 65 = 8*8+1 satisfies LTX 8k+1 constraint, gives ~2.7 s at 24 fps.
-            self.num_frames = min(self.num_frames, 65)
+            # 121 = 8*15+1 satisfies LTX 8k+1 constraint, gives ~5.0 s at 24 fps.
+            self.num_frames = min(self.num_frames, 121)
             if old_w != self.width or old_h != self.height:
                 LOGGER.info(
                     "VRAM auto-adjust (%.1f GiB): resolution %dx%d -> %dx%d, "
@@ -297,6 +297,7 @@ class VideoGenerator:
                     num_inference_steps=self.cfg.num_inference_steps,
                     guidance_scale=self.cfg.guidance_scale,
                     generator=generator,
+                    max_sequence_length=256,
                 )
                 frames = result.frames[0]
             except Exception as exc:
