@@ -80,7 +80,7 @@ class VideoGenConfig:
             self.height = min(self.height, 512)
             # 217 = 8*27+1 satisfies LTX 8k+1 constraint, gives ~9.0 s at 24 fps.
             # Covers typical 9s scenes so video duration matches narration.
-            self.num_frames = min(self.num_frames, 217)
+            self.num_frames = min(self.num_frames, 177)
             if old_w != self.width or old_h != self.height:
                 LOGGER.info(
                     "VRAM auto-adjust (%.1f GiB): resolution %dx%d -> %dx%d, "

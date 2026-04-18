@@ -71,7 +71,7 @@ video_generation:
   # Compatible with T4 (14.56 GB VRAM) using sequential CPU offload.
   model_id: Lightricks/LTX-Video
   device: cuda
-  num_frames: 217       # 8*27+1 = ~9.0 sec at 24 fps
+  num_frames: 177       # 8*22+1 = ~7.4 sec at 24 fps
   num_inference_steps: 25
   guidance_scale: 3.0
   use_cpu_offload: true   # requis pour T4 — sequential offload
