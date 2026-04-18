@@ -78,8 +78,9 @@ class VideoGenConfig:
             # 288×512: 9:16 portrait, both divisible by 32 (LTX requirement).
             self.width = min(self.width, 288)
             self.height = min(self.height, 512)
-            # 121 = 8*15+1 satisfies LTX 8k+1 constraint, gives ~5.0 s at 24 fps.
-            self.num_frames = min(self.num_frames, 121)
+            # 217 = 8*27+1 satisfies LTX 8k+1 constraint, gives ~9.0 s at 24 fps.
+            # Covers typical 9s scenes so video duration matches narration.
+            self.num_frames = min(self.num_frames, 217)
             if old_w != self.width or old_h != self.height:
                 LOGGER.info(
                     "VRAM auto-adjust (%.1f GiB): resolution %dx%d -> %dx%d, "
